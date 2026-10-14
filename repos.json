@@ -5,32 +5,42 @@
     { "id": "google", "url": "https://maven.google.com/" },
     { "id": "gradle-plugins", "url": "https://plugins.gradle.org/m2/" }
   ],
+  "npm_registry": "https://registry.npmjs.org/",
+  "pypi_index": "https://pypi.org/simple/",
   "default_platforms": ["linux-x86_64", "windows-x86_64"],
   "platforms": {
     "linux-x86_64": {
       "os_name": "Linux", "os_arch": "amd64",
       "detected_name": "linux", "detected_arch": "x86_64", "detected_classifier": "linux-x86_64",
-      "os_tokens": ["linux"], "arch_tokens": ["x86_64", "amd64", "x64"]
+      "os_tokens": ["linux"], "arch_tokens": ["x86_64", "amd64", "x64"],
+      "docker_platform": "linux/amd64",
+      "pip_platforms": ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux_2_24_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64",
+                        "manylinux_2_12_x86_64", "manylinux2010_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64"]
     },
     "windows-x86_64": {
       "os_name": "Windows 10", "os_arch": "amd64",
       "detected_name": "windows", "detected_arch": "x86_64", "detected_classifier": "windows-x86_64",
-      "os_tokens": ["windows", "win", "win32", "win64"], "arch_tokens": ["x86_64", "amd64", "x64"]
+      "os_tokens": ["windows", "win", "win32", "win64"], "arch_tokens": ["x86_64", "amd64", "x64"],
+      "pip_platforms": ["win_amd64"]
     },
     "linux-aarch64": {
       "os_name": "Linux", "os_arch": "aarch64",
       "detected_name": "linux", "detected_arch": "aarch_64", "detected_classifier": "linux-aarch_64",
-      "os_tokens": ["linux"], "arch_tokens": ["aarch64", "arm64", "aarch_64"]
+      "os_tokens": ["linux"], "arch_tokens": ["aarch64", "arm64", "aarch_64"],
+      "docker_platform": "linux/arm64",
+      "pip_platforms": ["manylinux_2_28_aarch64", "manylinux_2_27_aarch64", "manylinux_2_24_aarch64", "manylinux_2_17_aarch64", "manylinux2014_aarch64"]
     },
     "macos-x86_64": {
       "os_name": "Mac OS X", "os_arch": "x86_64",
       "detected_name": "osx", "detected_arch": "x86_64", "detected_classifier": "osx-x86_64",
-      "os_tokens": ["macos", "osx", "mac", "darwin"], "arch_tokens": ["x86_64", "amd64", "x64"]
+      "os_tokens": ["macos", "osx", "mac", "darwin"], "arch_tokens": ["x86_64", "amd64", "x64"],
+      "pip_platforms": ["macosx_14_0_x86_64"]
     },
     "macos-aarch64": {
       "os_name": "Mac OS X", "os_arch": "aarch64",
       "detected_name": "osx", "detected_arch": "aarch_64", "detected_classifier": "osx-aarch_64",
-      "os_tokens": ["macos", "osx", "mac", "darwin"], "arch_tokens": ["aarch64", "arm64", "aarch_64"]
+      "os_tokens": ["macos", "osx", "mac", "darwin"], "arch_tokens": ["aarch64", "arm64", "aarch_64"],
+      "pip_platforms": ["macosx_14_0_arm64"]
     }
   },
   "native_hints": [

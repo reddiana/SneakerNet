@@ -1,11 +1,13 @@
-"""테스트 보조: 가짜 Maven 저장소 생성, 가짜 Nexus/저장소 HTTP 서버, 가짜 mvn."""
+"""테스트 보조: 가짜 Maven 저장소 생성, 가짜 Nexus/저장소 HTTP 서버, 가짜 Docker 레지스트리, 가짜 mvn."""
 from __future__ import annotations
 
 import hashlib
 import io
 import json
 import re
+import tarfile
 import threading
+import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -90,9 +92,11 @@ class FakeServer:
     """로컬 디렉토리를 Maven 저장소 겸 (선택적으로) Nexus 처럼 서빙하는 HTTP 서버."""
 
     def __init__(self, root: Path, *, nexus_repo: str | None = None, allow_redeploy: bool = True,
-                 auth: tuple[str, str] | None = None):
+                 auth: tuple[str, str] | None = None, other_repos: dict[str, str] | None = None):
         self.root = root
         self.nexus_repo = nexus_repo
+        self.other_repos = other_repos or {}          # {저장소 이름: 형식} (npm, pypi)
+        self.components: list[tuple[str, str, str]] = []   # components API 로 받은 (저장소, 필드, 파일 이름)
         self.allow_redeploy = allow_redeploy
         self.auth = auth
         self.put_log: list[str] = []
@@ -140,12 +144,31 @@ class FakeServer:
                 if self.path.startswith("/service/rest/v1/status"):
                     return self._send(200, b"", head=head)
                 if self.path.startswith("/service/rest/v1/repositories"):
-                    body = json.dumps([{"name": outer.nexus_repo or "none", "format": "maven2", "type": "hosted"}]).encode()
+                    repos = [{"name": outer.nexus_repo or "none", "format": "maven2", "type": "hosted"}]
+                    repos += [{"name": n, "format": f, "type": "hosted"} for n, f in outer.other_repos.items()]
+                    body = json.dumps(repos).encode()
                     return self._send(200, body, "application/json", head)
                 f = self._file_for()
                 if f is not None and f.is_file():
                     return self._send(200, f.read_bytes(), head=head)
+                if f is not None and (f / "index.html").is_file():   # PyPI simple 색인
+                    return self._send(200, (f / "index.html").read_bytes(), "text/html", head)
                 self._send(404, b"not found", head=head)
+
+            def do_POST(self):
+                outer.requests.append(("POST", self.path))
+                data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if not self._check_auth():
+                    return
+                m = re.match(r"/service/rest/v1/components\?repository=([^&]+)$", self.path)
+                part = re.search(rb'name="([^"]+)"; filename="([^"]+)"', data)
+                if not m or m.group(1) not in outer.other_repos or not part:
+                    return self._send(404, b"no repo")
+                item = (m.group(1), part.group(1).decode(), part.group(2).decode())
+                if item in outer.components and not outer.allow_redeploy:
+                    return self._send(400, b"Repository does not allow updating assets: " + m.group(1).encode())
+                outer.components.append(item)
+                self._send(204)
 
             def do_HEAD(self):
                 self.do_GET(head=True)
@@ -173,6 +196,145 @@ class FakeServer:
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def npm_tarball(name: str, version: str) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        data = json.dumps({"name": name, "version": version}).encode()
+        info = tarfile.TarInfo("package/package.json")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def wheel_bytes(name: str, version: str, requires=()) -> bytes:
+    info = f"{name}-{version}.dist-info"
+    meta = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n" + "".join(f"Requires-Dist: {r}\n" for r in requires)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(f"{name}/__init__.py", "")
+        z.writestr(f"{info}/METADATA", meta)
+        z.writestr(f"{info}/WHEEL", "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        z.writestr(f"{info}/RECORD", "")
+    return buf.getvalue()
+
+
+def build_fake_pypi(root: Path, wheels: dict[str, tuple[str, tuple]]) -> None:
+    """root/simple/<이름>/ 에 색인과 wheel 을 만든다. wheels: {이름: (버전, 의존성들)}."""
+    for name, (version, requires) in wheels.items():
+        d = root / "simple" / name
+        d.mkdir(parents=True, exist_ok=True)
+        filename = f"{name}-{version}-py3-none-any.whl"
+        (d / filename).write_bytes(wheel_bytes(name, version, requires))
+        (d / "index.html").write_text(f'<html><body><a href="{filename}">{filename}</a></body></html>', encoding="utf-8")
+
+
+class FakeRegistry:
+    """메모리에 이미지를 담는 Docker 레지스트리 (v2 API 중 받기/올리기에 쓰는 부분만)."""
+
+    def __init__(self, auth: tuple[str, str] | None = None):
+        self.blobs: dict[str, bytes] = {}
+        self.manifests: dict[tuple[str, str], tuple[str, bytes]] = {}
+        self.auth = auth
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, status: int, body: bytes = b"", headers: dict | None = None):
+                self.send_response(status)
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+
+            def _route(self):
+                data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if outer.auth:
+                    import base64
+                    if self.headers.get("Authorization") != "Basic " + base64.b64encode(":".join(outer.auth).encode()).decode():
+                        return self._send(401, b"", {"WWW-Authenticate": 'Basic realm="fake"'})
+                path, _, query = self.path.partition("?")
+                m = re.fullmatch(r"/v2/(.+)/(manifests|blobs)/(.+)", path)
+                if not m:
+                    return self._send(404)
+                name, kind, ref = m.groups()
+                if self.command in ("GET", "HEAD"):
+                    if kind == "manifests" and (name, ref) in outer.manifests:
+                        media, body = outer.manifests[(name, ref)]
+                        return self._send(200, body, {"Content-Type": media})
+                    if kind == "blobs" and ref in outer.blobs:
+                        return self._send(200, outer.blobs[ref])
+                    return self._send(404)
+                if self.command == "POST" and kind == "blobs" and ref == "uploads/":
+                    return self._send(202, b"", {"Location": f"/v2/{name}/blobs/uploads/{uuid.uuid4().hex}"})
+                if self.command == "PUT" and kind == "blobs":
+                    digest = dict(p.split("=", 1) for p in query.split("&"))["digest"].replace("%3A", ":")
+                    if "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+                        return self._send(400, b"digest mismatch")
+                    outer.blobs[digest] = data
+                    return self._send(201)
+                if self.command == "PUT" and kind == "manifests":
+                    doc = json.loads(data)
+                    needed = [d["digest"] for d in [doc.get("config", {})] + doc.get("layers", []) if d.get("digest")]
+                    if any(d not in outer.blobs for d in needed):
+                        return self._send(400, b"blob unknown")
+                    if any((name, e["digest"]) not in outer.manifests for e in doc.get("manifests", [])):
+                        return self._send(400, b"manifest unknown")
+                    media = self.headers.get("Content-Type")
+                    outer.manifests[(name, ref)] = (media, data)
+                    outer.manifests[(name, "sha256:" + hashlib.sha256(data).hexdigest())] = (media, data)
+                    return self._send(201)
+                self._send(405)
+
+            do_GET = do_HEAD = do_POST = do_PUT = _route
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    @property
+    def host(self) -> str:
+        return f"127.0.0.1:{self.port}"
+
+    def add_image(self, name: str, tag: str, archs=("amd64", "arm64")) -> dict[str, str]:
+        """플랫폼별 이미지와 그 목록(index)을 넣는다. {arch: 매니페스트 digest} 를 돌려준다."""
+        def blob(data: bytes) -> dict:
+            digest = "sha256:" + hashlib.sha256(data).hexdigest()
+            self.blobs[digest] = data
+            return {"digest": digest, "size": len(data)}
+
+        digests, entries = {}, []
+        media = "application/vnd.oci.image.manifest.v1+json"
+        for arch in archs:
+            config = json.dumps({"os": "linux", "architecture": arch}).encode()
+            manifest = json.dumps({
+                "schemaVersion": 2, "mediaType": media,
+                "config": {"mediaType": "application/vnd.oci.image.config.v1+json", **blob(config)},
+                "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", **blob(f"layer-{arch}".encode())},
+                           {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", **blob(b"shared-layer")}],
+            }).encode()
+            digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+            self.manifests[(name, digest)] = (media, manifest)
+            digests[arch] = digest
+            entries.append({"mediaType": media, "digest": digest, "size": len(manifest),
+                            "platform": {"os": "linux", "architecture": arch}})
+        index_media = "application/vnd.oci.image.index.v1+json"
+        index = json.dumps({"schemaVersion": 2, "mediaType": index_media, "manifests": entries}).encode()
+        self.manifests[(name, tag)] = (index_media, index)
+        return digests
 
     def __enter__(self):
         self.thread.start()

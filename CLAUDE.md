@@ -3,6 +3,7 @@
 ## 목적
 `pom.xml` / `build.gradle` / 단일 좌표(`group:artifact:version`)의 종속성을 하나의 디렉토리로 수집해 폐쇄망 Nexus 3(maven2 hosted)에 올리고,
 올라간 Nexus에서 **Maven과 Gradle이 모두** 내려받을 수 있게 한다. 구현은 Python 3 표준 라이브러리 + Gradle init script.
+같은 흐름으로 npm 패키지, PyPI 패키지, Docker 이미지도 받아 Nexus의 npm / pypi / docker hosted 저장소에 올린다 (2026-10-14 추가).
 
 ## 확정된 요구사항
 - 입력: 빌드 파일(`pom.xml` 또는 `build.gradle[.kts]`, 여러 개 가능, 이름 자유 - 확장자로 구분) + 단일 좌표 모드
@@ -16,6 +17,13 @@
 - 플랫폼: `linux-x86_64`, `windows-x86_64` (`--platforms`로 확장)
 - 수집 파일: jar, pom, `.module`, 탈락 버전의 POM/jar (sources, javadoc, Gradle Wrapper 제외)
 - 반입: 매번 전체 반입, 체크섬 매니페스트/증분/라이선스 점검 없음 (`_artifacts.csv`만 동봉)
+- npm / PyPI / Docker (2026-10-14, 입력 형식과 GUI 배치는 사용자 확인 없이 내가 정했다. 사용자가 보고 바꿀 수 있다)
+  - 입력: npm 은 `package-lock.json`/`package.json`(`.json`) + `이름@버전`, PyPI 는 `requirements.txt`(`.txt`) + `이름==버전`,
+    Docker 는 `이름:태그`. 직접 적은 것이 저장소에 없으면 Maven 좌표와 같은 형식의 `오류:` 로 다운로드 전에 끝낸다.
+  - 반입 디렉토리의 `_npm/`, `_pypi/`, `_docker/` 에 둔다 (`_` 로 시작해 Maven 업로드 대상과 섞이지 않는다).
+  - upload 는 폴더에 들어 있는 종류마다 대상(`--repo`, `--npm-repo`, `--pypi-repo`, `--docker-url`)이 있어야 하고, 없으면 올리기 전에 오류.
+  - PyPI 는 wheel 만 (대상 플랫폼 × `--python-versions`), Docker 는 linux 이미지만. docker 프로그램은 쓰지 않는다.
+  - verify 는 Maven / Gradle 만 한다.
 - 단계: collect → upload → verify (업로드/검증은 폐쇄망에서 Python만으로 동작)
 - GUI (사용자 요구로 확정된 것)
   - 화면 문구는 영어. 설명 없이 쓸 수 있도록 탭마다 안내문, 입력란마다 회색 설명을 둔다. 새 입력란을 추가할 때도 지킨다.
@@ -35,14 +43,19 @@
   - `find_tool`: PATH에 없는 mvn/gradle을 흔한 설치 위치에서 탐색 (Step 1, 3에 `--mvn-cmd`/`--gradle-cmd`로 전달)
 - `Start sneakernet.bat` 이 PC에서 GUI 실행 (zip 안의 bat은 `sneakernet_gui.py`의 `START_BAT`에서 생성하며 내용이 다르다)
 - `sneakernet.py` CLI 진입점, `snk/` 패키지 (`collect`, `maven`, `gradle`, `normalize`, `enrich`, `upload`, `verify`, `common`)
+  - `collect.run` 이 종류별로 나눠 부른다: `_collect_java`(Maven/Gradle), `npm.collect`, `pypi.collect`, `docker.collect`
+  - `snk/npm.py` lock 파일의 tarball 을 받는다 (lock 이 없으면 `npm install --package-lock-only`)
+  - `snk/pypi.py` + `snk/pip_target.py` `pip download` 를 대상 플랫폼의 환경 마커로 실행 (`python -m snk.pip_target`, cwd 는 프로그램 폴더)
+  - `snk/docker.py` 레지스트리 v2 클라이언트(`Registry`), `pull` / `push`
 - `snk/init-resolve.groovy` 모든 resolvable configuration 강제 해석, `init-nexus.groovy` verify 용 저장소 바꿔치기
-- `repos.json` 저장소, 플랫폼, `native_hints` 설정
+- `repos.json` 저장소, 플랫폼, `native_hints` 설정. `npm_registry`, `pypi_index`, 플랫폼별 `pip_platforms` / `docker_platform` 도 여기 있다.
 - `tests/` 단위 테스트 + 가짜 Maven 저장소/가짜 Nexus/가짜 mvn 기반 end-to-end 테스트 (GUI 테스트는 없음)
+  - `tests/test_packages.py` npm / PyPI / Docker (가짜 npm 저장소, 가짜 PyPI 색인 + 실제 pip, `FakeRegistry`)
 - `tests/data/pom.xml`, `tests/data/mvn_build_result.txt` 는 테스트가 아니라 사용자가 문제 분석용으로 넣어 둔 자료다.
 
 ## 테스트
 ```bash
-python -m unittest discover -s tests -t .   # 22개, 약 2분 (gradle 필요; Gradle 9 는 JDK 17+)
+python -m unittest discover -s tests -t .   # 36개, 약 2분 (gradle 필요; Gradle 9 는 JDK 17+)
 ```
 
 ## 실제 환경에서 확인한 것 (2026-10-13, Windows 11, Maven 3.9.16, Gradle 9.8, JDK 17, Python 3.15)
@@ -56,8 +69,19 @@ python -m unittest discover -s tests -t .   # 22개, 약 2분 (gradle 필요; Gr
 - 사용자의 실제 프로젝트(Keycloak 23.0.0 의존 `basic-auth-flow`) pom으로 collect 통과 (648 GAV, 문제/경고 없음).
 - GUI: 코드로 구동해 실제 수집, zip 생성, zip을 풀어 bat 실행(`--step 2`)까지 확인.
 
+## 실제 환경에서 확인한 것 (2026-10-14, npm 11.19, pip 26.2.1)
+- 실제 npm 저장소: `--npm esbuild@0.21.5` 로 lock 생성 후 linux-x64 / win32-x64 것만 받음.
+- 실제 PyPI: Windows PC 에서 linux + windows, Python 3.12 대상으로 `pywin32; sys_platform == 'win32'` 는 windows 용만,
+  `uvloop; sys_platform != 'win32'` 는 linux 용만, click 의 colorama 는 windows 쪽에서만 받음 (마커 바꿔치기 동작).
+- 실제 Docker Hub: `hello-world:latest`, `alpine:3.20` 의 linux/amd64 를 받음 (토큰 인증, 블롭 리다이렉트).
+- 이 PC 의 npm 설정(.npmrc)에는 지금 네트워크에서 닿지 않는 프록시가 들어 있다. `npm.make_lock` 이 네트워크 오류를 보면 프록시 없이 다시 실행한다.
+  Python(urllib, pip)은 프록시 없이 바로 나간다.
+
 ## 아직 검증하지 못한 것 (이어서 할 일)
 테스트에서 `mvn`은 스텁(`tests/helpers.py`의 `FAKE_MVN`)이다.
+0. **npm / PyPI / Docker 를 실제 Nexus 에 올리는 것.** 가짜 서버로만 시험했다. 확인할 것: components API 의 필드 이름
+   (`npm.asset`, `pypi.asset`)과 응답 코드, 재배포 금지 저장소의 400 문구, Docker 커넥터에 Basic 인증으로 올라가는지,
+   Nexus 가 새로 만든 index 를 받아 주는지.
 1. **폐쇄망 빌드 실패 원인 확정**: 사용자의 Docker 빌드(`mvn clean package -DskipTests -B -o`)가 실패했다.
    처음에는 다른 프로젝트(Keycloak 26.0.0)의 pom으로 수집했던 것이 원인 중 하나였고, 올바른 pom으로 다시 한 뒤에도 실패한다고 한다.
    새 오류 로그는 아직 받지 못했다. 후보: (a) `-o` 오프라인 모드, (b) 업로드한 hosted 저장소가 빌드가 쓰는 group(`maven-public`)의

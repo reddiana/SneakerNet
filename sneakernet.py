@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """sneakernet CLI.
 
-  collect : pom.xml / build.gradle / 좌표의 종속성을 하나의 디렉토리로 수집 (인터넷 되는 PC)
-  upload  : 수집된 디렉토리를 Nexus 3 maven2 hosted 저장소에 업로드 (폐쇄망)
+  collect : pom.xml / build.gradle / 좌표의 종속성, npm / PyPI 패키지, Docker 이미지를 하나의 디렉토리로 수집 (인터넷 되는 PC)
+  upload  : 수집된 디렉토리를 Nexus 3 의 hosted 저장소(maven2, npm, pypi, docker)에 업로드 (폐쇄망)
   verify  : 업로드된 Nexus 만으로 Maven/Gradle 이 해석되는지 확인 (폐쇄망)
 """
 import argparse
@@ -25,14 +25,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("collect", help="종속성 수집")
     c.add_argument("--input", "-i", action="append", metavar="FILE",
-                   help="pom.xml 또는 build.gradle[.kts] 파일 (여러 번 지정 가능)")
+                   help="pom.xml, build.gradle[.kts], package.json / package-lock.json, requirements.txt "
+                        "(여러 번 지정 가능, 확장자로 구분)")
     c.add_argument("--coordinate", "-c", action="append", metavar="G:A:V",
                    help="단일 종속성 좌표, 예: org.springframework:spring-core:6.1.0 (여러 번 지정 가능)")
+    c.add_argument("--npm", action="append", metavar="NAME@VERSION",
+                   help="npm 패키지, 예: express@4.19.2 (여러 번 지정 가능)")
+    c.add_argument("--pypi", action="append", metavar="NAME==VERSION",
+                   help="Python 패키지, 예: requests==2.32.3 (여러 번 지정 가능)")
+    c.add_argument("--python-versions", metavar="X.Y[,X.Y]",
+                   help="Python 패키지를 쓸 Python 버전, 쉼표 구분 (기본: 이 Python 의 버전)")
+    c.add_argument("--image", action="append", metavar="NAME:TAG",
+                   help="Docker 이미지, 예: nginx:1.27 또는 ghcr.io/org/app:1.0 (여러 번 지정 가능)")
     c.add_argument("--out", "-o", required=True, help="결과 디렉토리 (비어 있어야 함)")
     c.add_argument("--platforms", help="대상 플랫폼, 쉼표 구분 (기본: repos.json 의 default_platforms)")
     c.add_argument("--repos-config", help="저장소/플랫폼 설정 파일 (기본: repos.json)")
     c.add_argument("--mvn-cmd", help="mvn 실행 파일 경로")
     c.add_argument("--gradle-cmd", help="gradle 실행 파일 경로")
+    c.add_argument("--npm-cmd", help="npm 실행 파일 경로 (package-lock.json 없이 npm 패키지를 받을 때만 필요)")
     c.add_argument("--maven-goals", help="추가로 실행할 Maven 목표, 예: 'verify -DskipTests' (테스트 provider 등 수집용)")
     c.add_argument("--no-cross", action="store_true", help="반대 도구용 교차 해석을 건너뜀 (빠르지만 덜 완전함)")
     c.add_argument("--no-losers", action="store_true", help="충돌로 탈락한 버전의 POM/jar 를 수집하지 않음")
@@ -45,7 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
     u = sub.add_parser("upload", help="Nexus 3 에 업로드")
     u.add_argument("--dir", "-d", required=True, help="collect 결과 디렉토리")
     u.add_argument("--url", required=True, help="Nexus 주소, 예: http://nexus:8081")
-    u.add_argument("--repo", required=True, help="maven2 hosted 저장소 이름")
+    u.add_argument("--repo", help="maven2 hosted 저장소 이름 (Maven / Gradle 라이브러리가 있을 때)")
+    u.add_argument("--npm-repo", help="npm hosted 저장소 이름 (npm 패키지가 있을 때)")
+    u.add_argument("--pypi-repo", help="pypi hosted 저장소 이름 (Python 패키지가 있을 때)")
+    u.add_argument("--docker-url", help="docker hosted 저장소의 레지스트리 주소, 예: http://nexus:8082 (Docker 이미지가 있을 때)")
     u.add_argument("--user", "-u", help="업로드 계정")
     u.add_argument("--password", "-p", help="비밀번호 (환경 변수 NEXUS_PASSWORD 또는 터미널 입력 권장)")
     u.add_argument("--workers", type=int, default=4, help="동시 업로드 수 (기본 4)")

@@ -8,7 +8,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from . import gradle, maven, normalize
+from . import docker, gradle, maven, normalize, npm, pypi
 from .common import (GAV, BundlerError, HttpClient, find_tool, host_platform_key, load_config, log,
                      select_platforms)
 from .enrich import Enricher
@@ -22,7 +22,12 @@ def classify_input(path: Path) -> str:
         return "gradle"
     if name.endswith((".xml", ".pom")):
         return "maven"
-    raise BundlerError(f"입력 파일 형식을 알 수 없습니다 (pom.xml 또는 build.gradle[.kts] 이어야 함): {path}")
+    if name.endswith(".json"):
+        return "npm"
+    if name.endswith(".txt"):
+        return "pypi"
+    raise BundlerError("입력 파일 형식을 알 수 없습니다 (pom.xml, build.gradle[.kts], package.json / package-lock.json, "
+                       f"requirements.txt 중 하나여야 함): {path}")
 
 
 def input_warnings(path: Path, kind: str, text: str) -> list[str]:
@@ -195,46 +200,19 @@ def pom_literal_gavs(source: str) -> list[GAV]:
     return found
 
 
-def run(args) -> int:
-    cfg = load_config(args.repos_config)
+def _collect_java(args, cfg: dict, platforms: list[dict], host: str, inputs: list[Path], kinds: list[str],
+                  coords: list[GAV], out: Path, work: Path, checker: HttpClient, warnings: list[str]):
+    """Maven / Gradle 입력과 단일 좌표를 해석해 stage 에 모으고 보강한다. (stage, origins, enricher) 를 돌려준다."""
     repos = cfg["repositories"]
-    platforms = select_platforms(cfg, args.platforms)
-    host = host_platform_key()
-
-    inputs = [Path(p).resolve() for p in (args.input or [])]
-    coords = [GAV.parse(c) for c in (args.coordinate or [])]
-    if not inputs and not coords:
-        raise BundlerError("--input (pom.xml / build.gradle) 또는 --coordinate (group:artifact:version) 가 필요합니다.")
-    for p in inputs:
-        if not p.is_file():
-            raise BundlerError(f"입력 파일이 없습니다: {p}")
-    checker = HttpClient(no_proxy=args.no_proxy, timeout=20, retries=1)
-    check_coordinates(coords, repos, checker)
-
-    out = Path(args.out).resolve()
-    if out.exists() and any(out.iterdir()):
-        if not args.force:
-            raise BundlerError(f"출력 디렉토리가 비어 있지 않습니다: {out}  (--force 로 삭제 후 다시 만들 수 있습니다)")
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
-
-    keep_work = bool(args.keep_work or args.work_dir)
-    work = Path(args.work_dir).resolve() if args.work_dir else Path(tempfile.mkdtemp(prefix="snk-"))
-    if args.work_dir and work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True, exist_ok=True)
     logdir = work / "logs"
     stage = work / "stage"
     stage.mkdir()
-
-    kinds = [classify_input(p) for p in inputs]
     cross = not args.no_cross
     mvn = _tool("mvn", args.mvn_cmd, required="maven" in kinds)
     grd = _tool("gradle", args.gradle_cmd, required="gradle" in kinds)
     if coords and not (mvn or grd):
         raise BundlerError("--coordinate 는 mvn 또는 gradle 이 필요합니다.")
 
-    warnings: list[str] = []
     origins: dict[str, str] = {}
     snapshots: set[str] = set()
     maven_losers: set[GAV] = set()
@@ -329,31 +307,109 @@ def run(args) -> int:
     enricher = Enricher(stage, repos, client, platforms, cfg["native_hints"], origins,
                         with_sources=False, workers=args.workers).run(seeds)
 
-    # ---- 5) 출력
+    if snapshots:
+        warnings.append(f"SNAPSHOT 버전 {len(snapshots)}개는 반입 대상에서 제외했습니다: " + ", ".join(sorted(snapshots)[:5]))
     normalize.remove_junk(stage)
-    shutil.copytree(stage, out, dirs_exist_ok=True)
+    return stage, origins, enricher
+
+
+def run(args) -> int:
+    cfg = load_config(args.repos_config)
+    repos = cfg["repositories"]
+    platforms = select_platforms(cfg, args.platforms)
+    host = host_platform_key()
+
+    inputs = [Path(p).resolve() for p in (args.input or [])]
+    coords = [GAV.parse(c) for c in (args.coordinate or [])]
+    npm_specs = [npm.parse_spec(s) for s in (args.npm or [])]
+    pypi_specs = [s.strip() for s in (args.pypi or []) if s.strip()]
+    images = [docker.parse_ref(s) for s in (args.image or [])]
+    if not (inputs or coords or npm_specs or pypi_specs or images):
+        raise BundlerError("받을 것이 없습니다. --input (pom.xml / build.gradle / package.json / requirements.txt), "
+                           "--coordinate (group:artifact:version), --npm (이름@버전), --pypi (이름==버전), "
+                           "--image (이름:태그) 중 하나가 필요합니다.")
+    for p in inputs:
+        if not p.is_file():
+            raise BundlerError(f"입력 파일이 없습니다: {p}")
+    kinds = [classify_input(p) for p in inputs]
+    by_kind = lambda *wanted: [p for p, k in zip(inputs, kinds) if k in wanted]   # noqa: E731
+    npm_registry = cfg.get("npm_registry", "https://registry.npmjs.org/").rstrip("/") + "/"
+    pypi_index = cfg.get("pypi_index", "https://pypi.org/simple/").rstrip("/") + "/"
+    python_versions = pypi.parse_versions(args.python_versions)
+
+    # 직접 적은 것이 저장소에 있는지 먼저 확인한다 (없으면 아무것도 받지 않고 끝낸다)
+    checker = HttpClient(no_proxy=args.no_proxy, timeout=20, retries=1)
+    check_coordinates(coords, repos, checker)
+    npm.check_specs(npm_specs, npm_registry, checker)
+    pypi.check_specs(pypi_specs, pypi_index, checker)
+    docker.check_refs(images, args.no_proxy)
+
+    out = Path(args.out).resolve()
+    if out.exists() and any(out.iterdir()):
+        if not args.force:
+            raise BundlerError(f"출력 디렉토리가 비어 있지 않습니다: {out}  (--force 로 삭제 후 다시 만들 수 있습니다)")
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    keep_work = bool(args.keep_work or args.work_dir)
+    work = Path(args.work_dir).resolve() if args.work_dir else Path(tempfile.mkdtemp(prefix="snk-"))
+    if args.work_dir and work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True, exist_ok=True)
+
+    warnings: list[str] = []
+    problems: list[str] = []
+    report = [f"플랫폼: {', '.join(p['key'] for p in platforms)}"]
     rows = []
-    for f in sorted(stage.rglob("*")):
-        if f.is_file():
-            rel = f.relative_to(stage).as_posix()
-            rows.append((rel, f.stat().st_size, origins.get(rel, "resolver")))
+    client = HttpClient(no_proxy=args.no_proxy)
+
+    # ---- Maven / Gradle
+    java_inputs = by_kind("maven", "gradle")
+    if java_inputs or coords:
+        stage, origins, enricher = _collect_java(args, cfg, platforms, host, java_inputs,
+                                                 [k for k in kinds if k in ("maven", "gradle")], coords, out, work,
+                                                 checker, warnings)
+        shutil.copytree(stage, out, dirs_exist_ok=True)
+        for f in sorted(stage.rglob("*")):
+            if f.is_file():
+                rel = f.relative_to(stage).as_posix()
+                rows.append((rel, f.stat().st_size, origins.get(rel, "resolver")))
+        report.append(f"아티팩트(GAV) {len(normalize.scan_gavs(out))}개, 파일 {len(rows)}개, "
+                      f"{sum(r[1] for r in rows) / 1024 / 1024:.1f} MiB")
+        report.append("보강으로 추가: " + (", ".join(f"{k} {v}" for k, v in sorted(enricher.counts.items())) or "없음"))
+        warnings += enricher.warnings[:50]
+        problems += enricher.problems
+
+    # ---- npm / PyPI / Docker: 각자 _npm, _pypi, _docker 에 모은다 ('_' 로 시작해 Maven 업로드 대상과 섞이지 않는다)
+    def section(name: str, label: str) -> None:
+        files = [f for f in sorted((out / name).rglob("*")) if f.is_file()]
+        rows.extend((f.relative_to(out).as_posix(), f.stat().st_size, name[1:]) for f in files)
+        report.append(f"{label}, {sum(f.stat().st_size for f in files) / 1024 / 1024:.1f} MiB")
+
+    if by_kind("npm") or npm_specs:
+        count, warns, probs = npm.collect(by_kind("npm"), npm_specs, out, work, npm_registry, platforms,
+                                          args.npm_cmd, client, args.workers, args.no_proxy)
+        warnings += warns
+        problems += probs
+        section("_npm", f"npm 패키지 {count}개")
+    if by_kind("pypi") or pypi_specs:
+        count, warns, probs = pypi.collect(by_kind("pypi"), pypi_specs, out, work, pypi_index, platforms,
+                                           python_versions, args.no_proxy)
+        warnings += warns
+        problems += probs
+        section("_pypi", f"PyPI 파일 {count}개 (Python {', '.join(python_versions)})")
+    if images:
+        count, warns = docker.collect(images, out, platforms, args.no_proxy, args.workers)
+        warnings += warns
+        section("_docker", f"Docker 이미지 {count}개 ({', '.join(docker.wanted_platforms(platforms))})")
+
+    # ---- 출력
     with open(out / "_artifacts.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["path", "size", "origin"])
         w.writerows(rows)
-
-    if snapshots:
-        warnings.append(f"SNAPSHOT 버전 {len(snapshots)}개는 반입 대상에서 제외했습니다: " + ", ".join(sorted(snapshots)[:5]))
-    gavs = normalize.scan_gavs(out)
-    total = sum(r[1] for r in rows)
-    report = [
-        f"플랫폼: {', '.join(p['key'] for p in platforms)}",
-        f"아티팩트(GAV) {len(gavs)}개, 파일 {len(rows)}개, {total / 1024 / 1024:.1f} MiB",
-        "보강으로 추가: " + (", ".join(f"{k} {v}" for k, v in sorted(enricher.counts.items())) or "없음"),
-    ]
     report += [f"[경고] {w}" for w in warnings]
-    report += [f"[경고] {w}" for w in enricher.warnings[:50]]
-    report += [f"[문제] {p}" for p in enricher.problems]
+    report += [f"[문제] {p}" for p in problems]
     (out / "_report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
 
     print("\n".join(report))
@@ -362,7 +418,7 @@ def run(args) -> int:
         shutil.rmtree(work, ignore_errors=True)
     else:
         print(f"작업 디렉토리(로그 포함): {work}")
-    if enricher.problems:
-        print(f"\n문제 {len(enricher.problems)}건이 있습니다. 위 [문제] 항목을 확인하세요. (종료 코드 2)")
+    if problems:
+        print(f"\n문제 {len(problems)}건이 있습니다. 위 [문제] 항목을 확인하세요. (종료 코드 2)")
         return 2
     return 0
