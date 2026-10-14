@@ -96,7 +96,9 @@ python -m unittest discover -s tests -t .   # 36개, 약 2분 (gradle 필요; Gr
    결과는 아직 모른다. Maven verify 는 스텁으로도 시험하지 않았다.
 3. 실제 프로젝트(Spring Boot, Kotlin 플러그인 등)의 `build.gradle`로 collect
 4. Maven 테스트 provider(surefire 등)가 빠지는지 확인
-5. GUI 화면 배치. 이 PC는 화면 캡처가 차단되어 있어 직접 보지 못했다 (캡처를 다시 시도하지 말 것). 사용자가 보고 알려 준다.
+5. 2026-10-14 GUI 를 코드로 구동한 시험에서 단일 좌표 `junit:junit:4.13.2` (+ `hello-world` 이미지) collect 가
+   10분 넘게 끝나지 않았다 (Maven 단계로 보임). 원인은 조사하지 않았다. 같은 시험을 npm 으로 바꾸면 바로 끝났다.
+6. GUI 화면 배치. 이 PC는 화면 캡처가 차단되어 있어 직접 보지 못했다 (캡처를 다시 시도하지 말 것). 사용자가 보고 알려 준다.
 
 ## 알려진 한계
 - 빌드 파일을 하나씩 독립적으로 해석하므로 상대경로 parent, 멀티모듈, `apply from:` 등은 실패할 수 있음 (경고만 출력)
