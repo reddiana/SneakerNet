@@ -424,7 +424,9 @@ class App(tk.Tk):
         ttk.Button(bf, text="Open summary report", command=self._open_report).pack(side="left")
         self._hint(f, row + 3, "1) \"Start download\" saves everything from the four tabs in a new folder inside your Downloads folder.  "
                                "2) \"Create transfer zip...\" then asks where to save one zip file (for example on a "
-                               "USB drive) that contains this program and the downloads. Carry that file.")
+                               "USB drive) that contains this program and the downloads. Carry that file.  "
+                               "When the download finishes its folder opens. If you only need Docker images, no zip is "
+                               "needed: carry the .tar files and run  docker load -i <file>.tar  there.")
         return f
 
     def _upload_tab(self, tabs) -> ttk.Frame:
@@ -544,8 +546,26 @@ class App(tk.Tk):
             if var.get():
                 args.append(flag)
         args += self._tool_args()
-        self._start(args, lambda: self.bundle.set(out),
-                    f"Download finished: {out}  Next: press \"Create transfer zip...\".")
+        only_images = images and not (inputs or coords or npm_specs or pypi_specs)
+        if only_images:   # Docker 이미지만 받았으면 zip 없이 tar 를 그대로 가져가면 된다
+            folder = Path(out) / "_docker"
+            text = (f"Download finished: {folder}  Carry the .tar files and run  docker load -i <file>.tar  "
+                    "(or press \"Create transfer zip...\" to upload them to Nexus).")
+        else:
+            folder = Path(out)
+            text = f"Download finished: {out}  Next: press \"Create transfer zip...\"."
+
+        def done() -> None:
+            self.bundle.set(out)
+            self._open_folder(folder)
+
+        self._start(args, done, text)
+
+    def _open_folder(self, folder: Path) -> None:
+        if os.name == "nt" and folder.is_dir():
+            os.startfile(folder)  # noqa: S606
+        else:
+            self._append(f"Result: {folder}\n")
 
     @staticmethod
     def _new_out() -> str:

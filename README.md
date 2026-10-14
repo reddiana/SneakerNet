@@ -69,6 +69,8 @@ python sneakernet_gui.py
    - `pom.xml`/`build.gradle` 안에 저장소에 없는 버전이나 이름이 있어도 같은 형식의 오류가 나오고, 파일의 몇 번째 줄인지 알려 줍니다.
 2. `Target systems`에서 라이브러리를 쓸 운영체제를 고릅니다 (기본: linux-x86_64, windows-x86_64).
 3. `Start download`를 누릅니다. 샘플 기준 2분 안팎이 걸립니다. 저장 위치는 묻지 않습니다.
+   다 받으면 받은 폴더가 탐색기로 열립니다. **Docker 이미지만 받았다면** `_docker` 폴더가 열리고, 그 안의 `.tar` 파일만
+   가져가서 `docker load -i <파일>.tar`로 읽으면 되므로 zip을 만들 필요가 없습니다 (Nexus에 올리려면 zip을 만드세요).
 4. `Open summary report`로 `_report.txt`를 열어 `[문제]`가 없는지 확인합니다.
 5. `Create transfer zip...`을 누르고 zip을 저장할 곳(USB 드라이브 등)을 고릅니다. 마지막으로 고른 위치에서 시작합니다.
    zip이 만들어지면 그 폴더가 파일 탐색기로 열리고 zip이 선택되어 있습니다.
