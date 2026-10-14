@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .gradle/
+tests/data/pom.xml
+tests/data/mvn_build_result.txt
