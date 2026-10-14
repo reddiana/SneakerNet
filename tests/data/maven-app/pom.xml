@@ -1,0 +1,5 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>app</groupId><artifactId>input</artifactId><version>1</version>
+  <dependencies><dependency><groupId>com.example</groupId><artifactId>lib-a</artifactId><version>1.0</version></dependency><dependency><groupId>com.example</groupId><artifactId>lib-c</artifactId><version>1.0</version></dependency></dependencies>
+</project>

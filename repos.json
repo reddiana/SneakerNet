@@ -1,0 +1,83 @@
+{
+  "_comment": "수집 대상 저장소, 플랫폼, 네이티브 classifier 힌트 설정. 필요하면 이 파일을 수정하거나 --repos-config로 다른 파일을 지정하세요.",
+  "repositories": [
+    { "id": "central", "url": "https://repo.maven.apache.org/maven2/" },
+    { "id": "google", "url": "https://maven.google.com/" },
+    { "id": "gradle-plugins", "url": "https://plugins.gradle.org/m2/" }
+  ],
+  "default_platforms": ["linux-x86_64", "windows-x86_64"],
+  "platforms": {
+    "linux-x86_64": {
+      "os_name": "Linux", "os_arch": "amd64",
+      "detected_name": "linux", "detected_arch": "x86_64", "detected_classifier": "linux-x86_64",
+      "os_tokens": ["linux"], "arch_tokens": ["x86_64", "amd64", "x64"]
+    },
+    "windows-x86_64": {
+      "os_name": "Windows 10", "os_arch": "amd64",
+      "detected_name": "windows", "detected_arch": "x86_64", "detected_classifier": "windows-x86_64",
+      "os_tokens": ["windows", "win", "win32", "win64"], "arch_tokens": ["x86_64", "amd64", "x64"]
+    },
+    "linux-aarch64": {
+      "os_name": "Linux", "os_arch": "aarch64",
+      "detected_name": "linux", "detected_arch": "aarch_64", "detected_classifier": "linux-aarch_64",
+      "os_tokens": ["linux"], "arch_tokens": ["aarch64", "arm64", "aarch_64"]
+    },
+    "macos-x86_64": {
+      "os_name": "Mac OS X", "os_arch": "x86_64",
+      "detected_name": "osx", "detected_arch": "x86_64", "detected_classifier": "osx-x86_64",
+      "os_tokens": ["macos", "osx", "mac", "darwin"], "arch_tokens": ["x86_64", "amd64", "x64"]
+    },
+    "macos-aarch64": {
+      "os_name": "Mac OS X", "os_arch": "aarch64",
+      "detected_name": "osx", "detected_arch": "aarch_64", "detected_classifier": "osx-aarch_64",
+      "os_tokens": ["macos", "osx", "mac", "darwin"], "arch_tokens": ["aarch64", "arm64", "aarch_64"]
+    }
+  },
+  "native_hints": [
+    {
+      "match": "io.netty:netty-tcnative-boringssl-static",
+      "classifiers": {
+        "linux-x86_64": ["linux-x86_64"], "windows-x86_64": ["windows-x86_64"],
+        "linux-aarch64": ["linux-aarch_64"], "macos-x86_64": ["osx-x86_64"], "macos-aarch64": ["osx-aarch_64"]
+      }
+    },
+    {
+      "match": "io.netty:netty-transport-native-epoll",
+      "classifiers": { "linux-x86_64": ["linux-x86_64"], "linux-aarch64": ["linux-aarch_64"] }
+    },
+    {
+      "match": "io.netty:netty-transport-native-kqueue",
+      "classifiers": { "macos-x86_64": ["osx-x86_64"], "macos-aarch64": ["osx-aarch_64"] }
+    },
+    {
+      "match": "org.openjfx:javafx-*",
+      "classifiers": {
+        "linux-x86_64": ["linux"], "windows-x86_64": ["win"],
+        "linux-aarch64": ["linux-aarch64"], "macos-x86_64": ["mac"], "macos-aarch64": ["mac-aarch64"]
+      }
+    },
+    {
+      "match": "org.lwjgl:lwjgl*",
+      "classifiers": {
+        "linux-x86_64": ["natives-linux"], "windows-x86_64": ["natives-windows"],
+        "linux-aarch64": ["natives-linux-arm64"], "macos-x86_64": ["natives-macos"], "macos-aarch64": ["natives-macos-arm64"]
+      }
+    },
+    {
+      "match": "com.google.protobuf:protoc",
+      "extension": "exe",
+      "classifiers": {
+        "linux-x86_64": ["linux-x86_64"], "windows-x86_64": ["windows-x86_64"],
+        "linux-aarch64": ["linux-aarch_64"], "macos-x86_64": ["osx-x86_64"], "macos-aarch64": ["osx-aarch_64"]
+      }
+    },
+    {
+      "match": "io.grpc:protoc-gen-grpc-java",
+      "extension": "exe",
+      "classifiers": {
+        "linux-x86_64": ["linux-x86_64"], "windows-x86_64": ["windows-x86_64"],
+        "linux-aarch64": ["linux-aarch_64"], "macos-x86_64": ["osx-x86_64"], "macos-aarch64": ["osx-aarch_64"]
+      }
+    }
+  ]
+}

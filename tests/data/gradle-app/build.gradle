@@ -1,0 +1,8 @@
+plugins {
+    id 'java-library'
+}
+
+dependencies {
+    implementation 'com.example:lib-a:1.0'
+    implementation 'com.example:lib-c:1.0'
+}
