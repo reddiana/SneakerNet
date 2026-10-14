@@ -54,7 +54,8 @@ python sneakernet_gui.py
 - **Python**: `Python versions`에 **폐쇄망에서 쓸 Python 버전**(예: `3.11`)을 적습니다. 그 버전과 선택한 운영체제용 wheel을
   의존성까지 받습니다. wheel이 없고 소스 배포본만 있는 패키지는 받지 못하고 오류로 알려 줍니다.
 - **Docker**: Linux 이미지를 받습니다 (`linux-x86_64` → linux/amd64, `linux-aarch64` → linux/arm64).
-  Nexus에는 원래 레지스트리 주소를 뺀 이름으로 올라갑니다 (`nginx:1.27`, `org/app:1.0`).
+  이미지(플랫폼)마다 `_docker/<이름>_<태그>_<os>-<arch>.tar` 파일 하나로 받으며, Nexus 없이 `docker load -i <파일>.tar`로
+  바로 읽을 수 있습니다 (읽으면 `nginx:1.27`처럼 원래 이름이 붙습니다). Nexus에는 원래 레지스트리 주소를 뺀 이름으로 올라갑니다 (`nginx:1.27`, `org/app:1.0`).
 - 어느 종류든 직접 적은 이름이나 버전이 저장소에 없으면 다운로드를 시작하지 않고 오류로 알려 줍니다.
 
 아래는 `Maven / Gradle` 탭 기준 설명입니다.
@@ -120,6 +121,11 @@ docker pull nexus:8082/nginx:1.27        # 업로드가 끝나면 로그에 이�
 
 `package-lock.json`의 `resolved`가 `registry.npmjs.org`를 가리키고 있어도 npm은 `--registry`로 준 주소에서 받습니다.
 Docker 커넥터가 HTTP라면 Docker 데몬의 `insecure-registries`에 `nexus:8082`를 넣어야 합니다.
+Nexus를 거치지 않고 Docker가 있는 PC에 바로 넣으려면 반입한 폴더의 tar 파일을 읽습니다:
+
+```bash
+docker load -i bundle/_docker/nginx_1.27_linux-amd64.tar     # Loaded image: nginx:1.27
+```
 
 ## 업로드는 됐는데 폐쇄망 빌드가 실패할 때
 
@@ -200,7 +206,8 @@ bundle/
 ├── com/example/lib/1.0/lib-1.0.jar|pom|module ...   ← Maven2 레이아웃 (Nexus에 올라가는 부분)
 ├── _npm/<이름>/<이름>-<버전>.tgz                      ← npm 패키지
 ├── _pypi/<이름>-<버전>-...whl                         ← Python 패키지
-├── _docker/images.json, _docker/blobs/sha256/<hex>   ← Docker 이미지 (매니페스트, 설정, 레이어)
+├── _docker/<이름>_<태그>_<os>-<arch>.tar           ← Docker 이미지 (docker load -i 로 바로 읽힘)
+├── _docker/images.json                               ← Docker 이미지 목록 (업로드용)
 ├── _artifacts.csv      ← 파일 목록(경로, 크기, 출처)
 ├── _report.txt         ← 요약, 경고, 문제
 └── _samples/           ← verify 에 쓰는 입력 사본
@@ -227,8 +234,10 @@ bundle/
 - **Python**: 플랫폼과 Python 버전마다 `pip download --only-binary=:all: --platform ... --python-version ...`를 실행합니다.
   pip은 환경 마커(`; sys_platform == "win32"` 등)를 수집 PC 기준으로 평가하므로, 대상 플랫폼 기준으로 평가하도록
   바꿔서 실행합니다 (`snk/pip_target.py`).
-- **Docker**: 레지스트리 API로 매니페스트와 블롭을 받아 sha256을 확인합니다. 여러 플랫폼을 받았으면 받은 것만 담은
-  목록(index)을 새로 만들어 올립니다.
+- **Docker**: 레지스트리 API로 매니페스트와 블롭을 받아 sha256을 확인하고, `docker save`(Docker 25 이상)와 같은 형식의
+  tar로 묶습니다: OCI 이미지 레이아웃(`oci-layout`, `index.json`, `blobs/sha256/`)에 옛 Docker가 읽는 `manifest.json`을 함께
+  넣습니다. 레이어는 받은 압축 상태 그대로입니다. 업로드는 이 tar에서 블롭을 꺼내 올리며, 여러 플랫폼을 받았으면
+  받은 것만 담은 목록(index)을 새로 만들어 올립니다.
 - **업로드**: npm / Python은 Nexus의 components API(`/service/rest/v1/components`), Docker는 레지스트리 API로 올립니다.
 
 ## 한계 (알아 두세요)

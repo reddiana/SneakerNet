@@ -1,15 +1,21 @@
 """Docker 이미지: 레지스트리 HTTP API(v2)로 직접 내려받고 올린다. docker 프로그램은 필요 없다.
 
 반입 디렉토리의 _docker/ 구조:
-  images.json            이미지 목록 (이름, 태그, 플랫폼별 매니페스트 digest)
-  blobs/sha256/<hex>     매니페스트, 설정, 레이어 (digest 가 곧 파일 이름이라 이미지끼리 공유된다)
+  images.json                          이미지 목록 (이름, 태그, 플랫폼별 매니페스트 digest 와 tar 파일 이름)
+  <이름>_<태그>_<os>-<arch>.tar           이미지 하나(플랫폼 하나). `docker load -i` 로 바로 읽힌다.
+
+tar 는 Docker 25 이상의 `docker save` 와 같은 형식이다: OCI 이미지 레이아웃(oci-layout, index.json, blobs/sha256/<hex>)에
+옛 Docker 가 읽는 manifest.json 을 함께 넣는다. 레이어는 레지스트리에서 받은 압축 상태 그대로 둔다 (docker load 가 풀어 읽는다).
 """
 from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import re
+import shutil
+import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -41,6 +47,15 @@ class ImageRef:
     def name(self) -> str:
         """Nexus 에 올릴 이름: 원래 레지스트리 주소는 빼고, Docker Hub 공식 이미지의 library/ 도 뺀다."""
         return self.repo[len("library/"):] if self.registry in _HUB and self.repo.startswith("library/") else self.repo
+
+    @property
+    def load_name(self) -> str:
+        """docker load 뒤 이미지 이름 (태그 제외). Docker Hub 이미지는 docker 가 보여 주는 짧은 이름으로."""
+        return self.name if self.registry in _HUB else f"{self.registry}/{self.repo}"
+
+    @property
+    def full_name(self) -> str:
+        return f"docker.io/{self.repo}" if self.registry in _HUB else f"{self.registry}/{self.repo}"
 
     @property
     def base(self) -> str:
@@ -208,8 +223,8 @@ def check_refs(refs: list[ImageRef], no_proxy: bool) -> None:
         _get_manifest(Registry(no_proxy=no_proxy, timeout=30, retries=1), ref, ref.digest or ref.tag)
 
 
-def pull(ref: ImageRef, root: Path, wanted: list[str], no_proxy: bool, workers: int) -> dict:
-    """이미지 하나를 root(_docker) 에 받고 images.json 에 넣을 기록을 돌려준다."""
+def pull(ref: ImageRef, root: Path, cache: Path, wanted: list[str], no_proxy: bool, workers: int) -> dict:
+    """이미지 하나를 cache 에 받아 플랫폼마다 root(_docker) 에 tar 로 묶고, images.json 에 넣을 기록을 돌려준다."""
     reg = Registry(no_proxy=no_proxy)
     body, media = _get_manifest(reg, ref, ref.digest or ref.tag)
     top = json.loads(body)
@@ -241,7 +256,7 @@ def pull(ref: ImageRef, root: Path, wanted: list[str], no_proxy: bool, workers: 
         doc = json.loads(data)
         if "config" not in doc:
             raise BundlerError(f"{ref}: 지원하지 않는 옛 이미지 형식(schema 1)입니다.")
-        path = _blob_path(root, entry["digest"])
+        path = _blob_path(cache, entry["digest"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         blobs[doc["config"]["digest"]] = None
@@ -251,37 +266,84 @@ def pull(ref: ImageRef, root: Path, wanted: list[str], no_proxy: bool, workers: 
         record["manifests"].append(entry)
 
     def fetch(digest: str) -> None:
-        target = _blob_path(root, digest)
+        target = _blob_path(cache, digest)
         if not target.is_file():
             reg.download(f"{ref.base}/blobs/{digest}", target, digest)
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers, 4))) as pool:
         list(pool.map(fetch, blobs))
 
-    for data, entry in manifests:   # 단일 매니페스트는 플랫폼을 설정 블롭에서 읽는다
-        if entry["platform"] is None:
-            config = json.loads(_blob_path(root, json.loads(data)["config"]["digest"]).read_bytes())
+    for data, entry in manifests:
+        if entry["platform"] is None:   # 단일 매니페스트는 플랫폼을 설정 블롭에서 읽는다
+            config = json.loads(_blob_path(cache, json.loads(data)["config"]["digest"]).read_bytes())
             entry["platform"] = {"os": config.get("os"), "architecture": config.get("architecture")}
+        plat = entry["platform"]
+        label = ref.tag or ref.digest.partition(":")[2][:12]
+        entry["archive"] = re.sub(r"[^\w.\-]", "_", f"{ref.name}_{label}_{plat.get('os')}-{plat.get('architecture')}") + ".tar"
+        write_archive(root / entry["archive"], cache, data, entry, ref)
     return record
 
 
-def collect(refs: list[ImageRef], out: Path, platforms: list[dict], no_proxy: bool, workers: int) -> tuple[int, list[str]]:
-    """out/_docker 에 이미지를 모은다. (이미지 수, 경고) 를 돌려준다."""
+def write_archive(path: Path, cache: Path, manifest: bytes, entry: dict, ref: ImageRef) -> None:
+    """`docker load -i` 로 읽히는 tar 를 만든다 (docker save 와 같은 OCI 레이아웃 + manifest.json)."""
+    doc = json.loads(manifest)
+    layers = [d["digest"] for d in doc.get("layers", []) if not d.get("urls")]
+    blob = lambda digest: "blobs/" + digest.replace(":", "/")   # noqa: E731
+    annotations = {"io.containerd.image.name": f"{ref.full_name}:{ref.tag}", "org.opencontainers.image.ref.name": ref.tag} \
+        if ref.tag else {}
+    index = {"schemaVersion": 2, "mediaType": INDEX_TYPES[0],
+             "manifests": [{"mediaType": entry["mediaType"], "digest": entry["digest"], "size": len(manifest),
+                            **({"annotations": annotations} if annotations else {})}]}
+    legacy = [{"Config": blob(doc["config"]["digest"]), "RepoTags": [f"{ref.load_name}:{ref.tag}"] if ref.tag else [],
+               "Layers": [blob(d) for d in layers]}]
+    now = time.time()
+
+    def add_bytes(tf: tarfile.TarFile, name: str, data: bytes) -> None:
+        info = tarfile.TarInfo(name)
+        info.size, info.mtime, info.mode = len(data), now, 0o644
+        tf.addfile(info, io.BytesIO(data))
+
+    part = path.with_name(path.name + ".part")
+    with tarfile.open(part, "w", format=tarfile.PAX_FORMAT) as tf:
+        for d in ("blobs", "blobs/sha256"):
+            info = tarfile.TarInfo(d)
+            info.type, info.mtime, info.mode = tarfile.DIRTYPE, now, 0o755
+            tf.addfile(info)
+        add_bytes(tf, blob(entry["digest"]), manifest)
+        for digest in dict.fromkeys([doc["config"]["digest"]] + layers):
+            src = _blob_path(cache, digest)
+            info = tarfile.TarInfo(blob(digest))
+            info.size, info.mtime, info.mode = src.stat().st_size, now, 0o644
+            with open(src, "rb") as fh:
+                tf.addfile(info, fh)
+        add_bytes(tf, "index.json", json.dumps(index).encode("utf-8"))
+        add_bytes(tf, "manifest.json", json.dumps(legacy).encode("utf-8"))
+        add_bytes(tf, "oci-layout", b'{"imageLayoutVersion":"1.0.0"}')
+    part.replace(path)
+
+
+def collect(refs: list[ImageRef], out: Path, work: Path, platforms: list[dict], no_proxy: bool,
+            workers: int) -> tuple[int, list[str]]:
+    """out/_docker 에 이미지를 tar 로 모은다. (이미지 수, 경고) 를 돌려준다."""
     root = out / "_docker"
     root.mkdir(parents=True, exist_ok=True)
+    cache = work / "docker-blobs"   # 이미지끼리 같은 레이어를 한 번만 받도록 모아 두는 곳
     wanted = wanted_platforms(platforms)
     warnings = []
     if not any(p.get("docker_platform") for p in platforms):
         warnings.append("Docker: 선택한 플랫폼에 컨테이너용이 없어 linux/amd64 이미지를 받았습니다.")
     records = []
-    for ref in refs:
-        log.info("Docker 이미지 받기: %s (%s)", ref, ", ".join(wanted))
-        record = pull(ref, root, wanted, no_proxy, workers)
-        for entry in record["manifests"]:
-            key = f"{entry['platform'].get('os')}/{entry['platform'].get('architecture')}"
-            if key not in wanted:
-                warnings.append(f"Docker: {ref} 은(는) {key} 용 이미지 하나뿐이라 그대로 받았습니다.")
-        records.append(record)
+    try:
+        for ref in refs:
+            log.info("Docker 이미지 받기: %s (%s)", ref, ", ".join(wanted))
+            record = pull(ref, root, cache, wanted, no_proxy, workers)
+            for entry in record["manifests"]:
+                key = f"{entry['platform'].get('os')}/{entry['platform'].get('architecture')}"
+                if key not in wanted:
+                    warnings.append(f"Docker: {ref} 은(는) {key} 용 이미지 하나뿐이라 그대로 받았습니다.")
+            records.append(record)
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
     (root / "images.json").write_text(json.dumps(records, indent=2), encoding="utf-8")
     return len(records), warnings
 
@@ -305,7 +367,7 @@ def _fail(code: int, what: str, body: bytes = b"") -> BundlerError:
     return BundlerError(f"HTTP {code} {detail} ({what})")
 
 
-def _push_blob(reg: Registry, base: str, path: Path, digest: str) -> str:
+def _push_blob(reg: Registry, base: str, archive: tarfile.TarFile, member: tarfile.TarInfo, digest: str) -> str:
     code, _, _ = reg.fetch("HEAD", f"{base}/blobs/{digest}")
     if code == 200:
         return "skipped"
@@ -315,11 +377,9 @@ def _push_blob(reg: Registry, base: str, path: Path, digest: str) -> str:
         raise _fail(code, start, body)
     target = urljoin(start, headers["Location"])
     target += ("&" if "?" in target else "?") + "digest=" + quote(digest, safe="")
-    size = path.stat().st_size
-
-    def factory():
-        fh = open(path, "rb")
-        return fh, size, fh.close
+    def factory():   # 재시도할 때마다 tar 안의 파일을 처음부터 다시 읽는다
+        fh = archive.extractfile(member)
+        return fh, member.size, fh.close
 
     with reg.open("PUT", target, headers={"Content-Type": "application/octet-stream"}, body_factory=factory) as resp:
         if resp.code not in (201, 202, 204):
@@ -341,14 +401,26 @@ def push(bundle: Path, url: str, reg: Registry, results: dict) -> list[str]:
     for image in load_images(bundle):
         base = f"{url}/v2/{image['name']}"
         entries = []
+        single = b""
         for entry in image["manifests"]:
-            data = _blob_path(root, entry["digest"]).read_bytes()
-            doc = json.loads(data)
-            for desc in [doc["config"]] + doc.get("layers", []):
-                blob = _blob_path(root, desc["digest"])
-                if blob.is_file():
-                    state = _push_blob(reg, base, blob, desc["digest"])
-                    results[state].append({"path": f"_docker/{image['name']}/{desc['digest']}", "detail": ""})
+            if not entry.get("archive"):
+                raise BundlerError(f"{root} 은(는) 이전 형식(blobs 폴더)으로 받은 Docker 이미지입니다. 이미지를 다시 받으세요.")
+            path = root / entry["archive"]
+            try:
+                archive = tarfile.open(path)
+            except (OSError, tarfile.TarError) as e:
+                raise BundlerError(f"Docker 이미지 파일을 읽을 수 없습니다: {path} ({e})")
+            with archive:
+                members = {m.name: m for m in archive.getmembers() if m.isfile()}
+                blob = lambda digest: members.get("blobs/" + digest.replace(":", "/"))   # noqa: E731
+                if not blob(entry["digest"]):
+                    raise BundlerError(f"Docker 이미지 파일에 매니페스트가 없습니다: {path}")
+                single = data = archive.extractfile(blob(entry["digest"])).read()
+                doc = json.loads(data)
+                for desc in [doc["config"]] + doc.get("layers", []):
+                    if blob(desc["digest"]):
+                        state = _push_blob(reg, base, archive, blob(desc["digest"]), desc["digest"])
+                        results[state].append({"path": f"_docker/{entry['archive']}/{desc['digest']}", "detail": ""})
             _put_manifest(reg, base, entry["digest"], entry["mediaType"], data)
             entries.append({"mediaType": entry["mediaType"], "size": len(data), "digest": entry["digest"],
                             "platform": entry["platform"]})
@@ -358,8 +430,7 @@ def push(bundle: Path, url: str, reg: Registry, results: dict) -> list[str]:
                 index = json.dumps({"schemaVersion": 2, "mediaType": media, "manifests": entries}).encode("utf-8")
                 _put_manifest(reg, base, image["tag"], media, index)
             else:
-                _put_manifest(reg, base, image["tag"], entries[0]["mediaType"],
-                              _blob_path(root, entries[0]["digest"]).read_bytes())
+                _put_manifest(reg, base, image["tag"], entries[0]["mediaType"], single)
         name = f"{host}/{image['name']}" + (f":{image['tag']}" if image.get("tag") else f"@{image['manifests'][0]['digest']}")
         results["uploaded"].append({"path": f"_docker/{image['name']}:{image.get('tag')}", "detail": name})
         pushed.append(name)

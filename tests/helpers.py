@@ -1,6 +1,7 @@
 """테스트 보조: 가짜 Maven 저장소 생성, 가짜 Nexus/저장소 HTTP 서버, 가짜 Docker 레지스트리, 가짜 mvn."""
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -238,6 +239,48 @@ def build_fake_pypi(root: Path, wheels: dict[str, tuple[str, tuple]]) -> None:
         (d / "index.html").write_text(f'<html><body><a href="{filename}">{filename}</a></body></html>', encoding="utf-8")
 
 
+def layer_tar(name: str, data: bytes) -> bytes:
+    """파일 하나를 담은 (압축하지 않은) 레이어 tar."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def check_docker_archive(path: Path) -> list[str]:
+    """docker load 가 하는 검사를 그대로 해 본다. 실패하면 AssertionError, 성공하면 RepoTags 를 돌려준다.
+
+    - 옛 방식(manifest.json): Config 와 Layers 파일이 있고, 레이어를 풀었을 때의 sha256 이 설정의 rootfs.diff_ids 와 같아야 한다.
+    - containerd 방식(oci-layout + index.json): index → 매니페스트 → 설정/레이어 블롭이 모두 있고 내용이 digest 와 같아야 한다.
+    """
+    with tarfile.open(path) as tf:
+        files = {m.name: tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
+    blob = lambda digest: files["blobs/" + digest.replace(":", "/")]   # noqa: E731
+
+    def same(digest: str, data: bytes) -> None:
+        assert digest == "sha256:" + hashlib.sha256(data).hexdigest(), f"digest mismatch {digest}"
+
+    assert json.loads(files["oci-layout"])["imageLayoutVersion"] == "1.0.0"
+    for desc in json.loads(files["index.json"])["manifests"]:
+        same(desc["digest"], blob(desc["digest"]))
+        assert desc["size"] == len(blob(desc["digest"]))
+        manifest = json.loads(blob(desc["digest"]))
+        for d in [manifest["config"]] + manifest["layers"]:
+            same(d["digest"], blob(d["digest"]))
+    (legacy,) = json.loads(files["manifest.json"])
+    config = json.loads(files[legacy["Config"]])
+    diff_ids = config["rootfs"]["diff_ids"]
+    assert len(diff_ids) == len(legacy["Layers"]), "layer count"
+    for name, diff_id in zip(legacy["Layers"], diff_ids):
+        data = files[name]
+        raw = gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
+        same(diff_id, raw)
+        tarfile.open(fileobj=io.BytesIO(raw)).getmembers()   # 레이어가 tar 인지
+    return legacy["RepoTags"]
+
+
 class FakeRegistry:
     """메모리에 이미지를 담는 Docker 레지스트리 (v2 API 중 받기/올리기에 쓰는 부분만)."""
 
@@ -319,12 +362,14 @@ class FakeRegistry:
         digests, entries = {}, []
         media = "application/vnd.oci.image.manifest.v1+json"
         for arch in archs:
-            config = json.dumps({"os": "linux", "architecture": arch}).encode()
+            layers = [layer_tar(f"etc/{arch}", arch.encode()), layer_tar("etc/shared", b"shared")]
+            config = json.dumps({"os": "linux", "architecture": arch, "rootfs": {
+                "type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(raw).hexdigest() for raw in layers]}}).encode()
             manifest = json.dumps({
                 "schemaVersion": 2, "mediaType": media,
                 "config": {"mediaType": "application/vnd.oci.image.config.v1+json", **blob(config)},
-                "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", **blob(f"layer-{arch}".encode())},
-                           {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", **blob(b"shared-layer")}],
+                "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", **blob(gzip.compress(raw, mtime=0))}
+                           for raw in layers],
             }).encode()
             digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
             self.manifests[(name, digest)] = (media, manifest)

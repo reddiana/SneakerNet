@@ -131,7 +131,7 @@ def write_transfer_zip(bundle: Path, dest: Path, progress=lambda text: None, can
                 if p.is_file() and "__pycache__" not in p.parts]
     files = [(p, "bundle/" + p.relative_to(bundle).as_posix()) for p in sorted(bundle.rglob("*")) if p.is_file()]
     stored = (".jar", ".aar", ".war", ".zip", ".exe", ".tgz", ".gz", ".whl")   # 이미 압축된 파일은 다시 압축하지 않는다
-    packed = lambda name: name.endswith(stored) or "/_docker/blobs/" in name   # noqa: E731
+    packed = lambda name: name.endswith(stored) or "/_docker/" in name   # noqa: E731
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("READ ME FIRST.txt", TRANSFER_README)
         z.writestr("Start sneakernet.bat", START_BAT)
@@ -358,8 +358,9 @@ class App(tk.Tk):
             book, "Docker images", "Images",
             "Docker images, one per line, as name:tag.  Examples:  nginx:1.27   bitnami/redis:7.2   "
             "ghcr.io/org/app:1.0\nDocker does not need to be installed. Linux images are downloaded "
-            "(linux/amd64 unless only an arm target system is ticked). In Nexus the image keeps its name without the "
-            "original registry address, for example nginx:1.27 or org/app:1.0.")
+            "(linux/amd64 unless only an arm target system is ticked). Each image is saved as a .tar file in the "
+            "_docker folder that can be loaded directly with  docker load -i <file>.tar  . In Nexus the image keeps its "
+            "name without the original registry address, for example nginx:1.27 or org/app:1.0.")
         self.images.configure(height=5)
         row = 2
 

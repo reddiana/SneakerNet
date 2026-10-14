@@ -23,6 +23,10 @@
   - 반입 디렉토리의 `_npm/`, `_pypi/`, `_docker/` 에 둔다 (`_` 로 시작해 Maven 업로드 대상과 섞이지 않는다).
   - upload 는 폴더에 들어 있는 종류마다 대상(`--repo`, `--npm-repo`, `--pypi-repo`, `--docker-url`)이 있어야 하고, 없으면 올리기 전에 오류.
   - PyPI 는 wheel 만 (대상 플랫폼 × `--python-versions`), Docker 는 linux 이미지만. docker 프로그램은 쓰지 않는다.
+  - Docker 이미지는 `docker load -i` 로 바로 읽히는 tar 로 받는다 (사용자 요구, 2026-10-14). 이미지×플랫폼마다
+    `_docker/<이름>_<태그>_<os>-<arch>.tar` 하나, 형식은 Docker 25+ `docker save` 와 같다 (OCI 레이아웃 + manifest.json).
+    업로드도 이 tar 에서 블롭을 꺼내 올린다. 이 PC 에 docker 가 없어 실제 `docker load` 는 해 보지 못했고,
+    `tests/helpers.py` 의 `check_docker_archive` 가 docker load 의 검사(diff_ids, digest)를 흉내 낸다.
   - verify 는 Maven / Gradle 만 한다.
 - 단계: collect → upload → verify (업로드/검증은 폐쇄망에서 Python만으로 동작)
 - GUI (사용자 요구로 확정된 것)
@@ -46,7 +50,7 @@
   - `collect.run` 이 종류별로 나눠 부른다: `_collect_java`(Maven/Gradle), `npm.collect`, `pypi.collect`, `docker.collect`
   - `snk/npm.py` lock 파일의 tarball 을 받는다 (lock 이 없으면 `npm install --package-lock-only`)
   - `snk/pypi.py` + `snk/pip_target.py` `pip download` 를 대상 플랫폼의 환경 마커로 실행 (`python -m snk.pip_target`, cwd 는 프로그램 폴더)
-  - `snk/docker.py` 레지스트리 v2 클라이언트(`Registry`), `pull` / `push`
+  - `snk/docker.py` 레지스트리 v2 클라이언트(`Registry`), `pull` / `write_archive`(tar 생성) / `push`
 - `snk/init-resolve.groovy` 모든 resolvable configuration 강제 해석, `init-nexus.groovy` verify 용 저장소 바꿔치기
 - `repos.json` 저장소, 플랫폼, `native_hints` 설정. `npm_registry`, `pypi_index`, 플랫폼별 `pip_platforms` / `docker_platform` 도 여기 있다.
 - `tests/` 단위 테스트 + 가짜 Maven 저장소/가짜 Nexus/가짜 mvn 기반 end-to-end 테스트 (GUI 테스트는 없음)
@@ -73,7 +77,8 @@ python -m unittest discover -s tests -t .   # 36개, 약 2분 (gradle 필요; Gr
 - 실제 npm 저장소: `--npm esbuild@0.21.5` 로 lock 생성 후 linux-x64 / win32-x64 것만 받음.
 - 실제 PyPI: Windows PC 에서 linux + windows, Python 3.12 대상으로 `pywin32; sys_platform == 'win32'` 는 windows 용만,
   `uvloop; sys_platform != 'win32'` 는 linux 용만, click 의 colorama 는 windows 쪽에서만 받음 (마커 바꿔치기 동작).
-- 실제 Docker Hub: `hello-world:latest`, `alpine:3.20` 의 linux/amd64 를 받음 (토큰 인증, 블롭 리다이렉트).
+- 실제 Docker Hub: `hello-world:latest`, `alpine:3.20`, `nginx:1.27-alpine` 의 linux/amd64 를 받음 (토큰 인증, 블롭 리다이렉트).
+  만든 tar 는 `check_docker_archive` 통과, 가짜 레지스트리로 push 도 통과.
 - 이 PC 의 npm 설정(.npmrc)에는 지금 네트워크에서 닿지 않는 프록시가 들어 있다. `npm.make_lock` 이 네트워크 오류를 보면 프록시 없이 다시 실행한다.
   Python(urllib, pip)은 프록시 없이 바로 나간다.
 
@@ -81,7 +86,7 @@ python -m unittest discover -s tests -t .   # 36개, 약 2분 (gradle 필요; Gr
 테스트에서 `mvn`은 스텁(`tests/helpers.py`의 `FAKE_MVN`)이다.
 0. **npm / PyPI / Docker 를 실제 Nexus 에 올리는 것.** 가짜 서버로만 시험했다. 확인할 것: components API 의 필드 이름
    (`npm.asset`, `pypi.asset`)과 응답 코드, 재배포 금지 저장소의 400 문구, Docker 커넥터에 Basic 인증으로 올라가는지,
-   Nexus 가 새로 만든 index 를 받아 주는지.
+   Nexus 가 새로 만든 index 를 받아 주는지. 그리고 받은 tar 가 실제 `docker load` 로 읽히는지.
 1. **폐쇄망 빌드 실패 원인 확정**: 사용자의 Docker 빌드(`mvn clean package -DskipTests -B -o`)가 실패했다.
    처음에는 다른 프로젝트(Keycloak 26.0.0)의 pom으로 수집했던 것이 원인 중 하나였고, 올바른 pom으로 다시 한 뒤에도 실패한다고 한다.
    새 오류 로그는 아직 받지 못했다. 후보: (a) `-o` 오프라인 모드, (b) 업로드한 hosted 저장소가 빌드가 쓰는 group(`maven-public`)의

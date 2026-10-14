@@ -15,7 +15,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
 import sneakernet  # noqa: E402
-from helpers import FakeRegistry, FakeServer, build_fake_pypi, npm_tarball, write_repos_config  # noqa: E402
+from helpers import FakeRegistry, FakeServer, check_docker_archive, build_fake_pypi, npm_tarball, write_repos_config  # noqa: E402
 from snk import docker, npm, pypi  # noqa: E402
 from snk.common import BundlerError, load_config, select_platforms  # noqa: E402
 
@@ -233,7 +233,10 @@ class DockerTests(Base):
             self.assertEqual(rc, 0, text)
             images = json.loads((self.out / "_docker/images.json").read_text())
             self.assertEqual([m["digest"] for m in images[0]["manifests"]], [digests["amd64"]])
-            self.assertEqual(len(list((self.out / "_docker/blobs/sha256").iterdir())), 4)   # 매니페스트, 설정, 레이어 2
+            self.assertEqual(sorted(f.name for f in (self.out / "_docker").iterdir()),
+                             ["images.json", "team_app_1.0_linux-amd64.tar"])
+            self.assertEqual(check_docker_archive(self.out / "_docker/team_app_1.0_linux-amd64.tar"),
+                             [f"{hub.host}/team/app:1.0"])   # docker load 로 읽힌다
 
             args = ["upload", "--dir", self.out, "--url", "http://127.0.0.1:1", "--user", "admin", "--password", "pw",
                     "--no-proxy", "--report", self.tmp / "r.json"]
@@ -263,6 +266,8 @@ class DockerTests(Base):
             rc, text = run_cli("collect", "--image", f"{hub.host}/app:2", "--out", self.out,
                                "--platforms", "linux-x86_64,linux-aarch64", "--no-proxy")
             self.assertEqual(rc, 0, text)
+            for arch in ("amd64", "arm64"):
+                check_docker_archive(self.out / f"_docker/app_2_linux-{arch}.tar")
             rc, text = run_cli("upload", "--dir", self.out, "--url", rest.url, "--docker-url", nexus.host, "--no-proxy",
                                "--report", self.tmp / "r.json")
             self.assertEqual(rc, 0, text)

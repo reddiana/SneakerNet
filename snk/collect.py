@@ -399,7 +399,7 @@ def run(args) -> int:
         problems += probs
         section("_pypi", f"PyPI 파일 {count}개 (Python {', '.join(python_versions)})")
     if images:
-        count, warns = docker.collect(images, out, platforms, args.no_proxy, args.workers)
+        count, warns = docker.collect(images, out, work, platforms, args.no_proxy, args.workers)
         warnings += warns
         section("_docker", f"Docker 이미지 {count}개 ({', '.join(docker.wanted_platforms(platforms))})")
 
