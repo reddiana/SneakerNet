@@ -195,7 +195,8 @@ python sneakernet.py verify --url http://nexus:8081 --repo maven-hosted --user a
 |---|---|
 | `upload --repo`, `--npm-repo`, `--pypi-repo` | maven2 / npm / pypi hosted 저장소 이름 (폴더에 들어 있는 종류만 필요) |
 | `upload --docker-url` | docker hosted 저장소의 레지스트리 주소, 예: `http://nexus:8082` |
-| `upload --check-exists` | 올리기 전에 존재 여부를 확인해 이미 있는 파일은 건너뜀 |
+| `upload --kinds maven,npm,pypi,docker` | 고른 종류만 올림 (기본: 폴더에 있는 것 전부). 고르지 않은 종류의 저장소는 필요 없음 |
+| `upload --check-exists` | 올리기 전에 존재 여부를 확인해 이미 있는 Maven 파일은 건너뜀 |
 | `upload --dry-run` | 대상 파일만 세고 올리지 않음 |
 | `upload --report FILE` | 결과 보고서 경로 (기본 `upload-report.json`) |
 | `verify --tools maven,gradle` | 검증할 도구 (설치된 것만 지정) |
