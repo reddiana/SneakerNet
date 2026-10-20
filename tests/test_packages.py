@@ -154,6 +154,18 @@ class NpmTests(Base):
             self.assertEqual(rc, 0, text)
             self.assertEqual(len(json.loads((self.tmp / "r.json").read_text())["skipped"]), 2)
 
+            # GUI 의 종류별 탭: 폴더에 다른 종류가 섞여 있어도 고른 종류만 올리고, 다른 저장소는 묻지 않는다
+            jar = self.out / "org/demo/demo/1.0/demo-1.0.pom"
+            jar.parent.mkdir(parents=True)
+            jar.write_text("<project/>")
+            rc, text = run_cli(*args, "--npm-repo", "npm-hosted", "--kinds", "npm", "--dry-run")
+            self.assertEqual(rc, 0, text)
+            self.assertIn("npm 패키지 2개", text)
+            self.assertNotIn("--repo", text)
+            rc, text = run_cli(*args, "--pypi-repo", "pypi-hosted", "--kinds", "pypi", "--dry-run")
+            self.assertEqual(rc, 1)
+            self.assertIn("올릴 Python 패키지 이(가) 없습니다", text)
+
     def test_checksum_mismatch_is_a_problem(self):
         root = self._registry()
         with FakeServer(root) as srv:

@@ -21,7 +21,7 @@
   - 입력: npm 은 `package-lock.json`/`package.json`(`.json`) + `이름@버전`, PyPI 는 `requirements.txt`(`.txt`) + `이름==버전`,
     Docker 는 `이름:태그`. 직접 적은 것이 저장소에 없으면 Maven 좌표와 같은 형식의 `오류:` 로 다운로드 전에 끝낸다.
   - 반입 디렉토리의 `_npm/`, `_pypi/`, `_docker/` 에 둔다 (`_` 로 시작해 Maven 업로드 대상과 섞이지 않는다).
-  - upload 는 폴더에 들어 있는 종류마다 대상(`--repo`, `--npm-repo`, `--pypi-repo`, `--docker-url`)이 있어야 하고, 없으면 올리기 전에 오류.
+  - upload 는 폴더에 들어 있는 종류마다 대상(`--repo`, `--npm-repo`, `--pypi-repo`, `--docker-url`)이 있어야 하고, 없으면 올리기 전에 오류. `--kinds` 로 고른 종류만 올리면 나머지 대상은 필요 없다.
   - PyPI 는 wheel 만 (대상 플랫폼 × `--python-versions`), Docker 는 linux 이미지만. docker 프로그램은 쓰지 않는다.
   - Docker 이미지는 `docker load -i` 로 바로 읽히는 tar 로 받는다 (사용자 요구, 2026-10-14). 이미지×플랫폼마다
     `_docker/<이름>_<태그>_<os>-<arch>.tar` 하나, 형식은 Docker 25+ `docker save` 와 같다 (OCI 레이아웃 + manifest.json).
@@ -31,6 +31,9 @@
 - 단계: collect → upload → verify (업로드/검증은 폐쇄망에서 Python만으로 동작)
 - GUI (사용자 요구로 확정된 것)
   - 화면 문구는 영어. 설명 없이 쓸 수 있도록 탭마다 안내문, 입력란마다 회색 설명을 둔다. 새 입력란을 추가할 때도 지킨다.
+  - 최상위 탭이 종류(Maven / Gradle, npm, Python, Docker), 그 안에 Step 탭 (2026-10-20 사용자 요구). 각 Step 에는 그 종류에
+    필요한 칸만 둔다. Step 3 은 Maven / Gradle 에만. Step 1 은 그 종류만 받고, Step 2 는 `upload --kinds <종류>` 로 그 종류만 올린다.
+    zip 의 bat(`--step 2`)은 `bundle_kind` 로 폴더에 든 종류의 탭을 연다.
   - Step 1: `Start download`는 라이브러리를 "다운로드" 폴더의 새 폴더(`sneakernet-<날짜_시각>`)에 받기만 한다 (위치를 묻지 않고,
     zip도 만들지 않는다). zip은 `Create transfer zip...` 버튼을 눌렀을 때만 만들고, 그때 저장 위치(USB 등)를 묻는다.
     이번 실행에서 받은 것이 없으면 이전 다운로드 폴더를 먼저 고르게 한다.

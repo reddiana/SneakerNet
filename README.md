@@ -35,12 +35,13 @@ Windows에서는 `Start sneakernet.bat`을 더블클릭합니다. 그 밖에는 
 python sneakernet_gui.py
 ```
 
-탭 세 개가 작업 순서입니다. 각 입력란 아래에 설명이 있고, 아래쪽 로그 창에 진행 상황이 나옵니다.
+맨 위 탭에서 받을 종류(`Maven / Gradle`, `npm`, `Python (pip)`, `Docker images`)를 고르면, 그 안의 Step 탭이 작업 순서입니다.
+Step 탭에는 그 종류에 필요한 칸만 나옵니다 (Step 3 확인은 Maven / Gradle 에만 있습니다).
+각 입력란 아래에 설명이 있고, 아래쪽 로그 창에 진행 상황이 나옵니다.
 
 ### Step 1: Download — 인터넷 되는 PC에서
 
-받을 것의 종류마다 탭이 있습니다 (`Maven / Gradle`, `npm`, `Python (pip)`, `Docker images`). 필요한 탭만 채우면 되고,
-`Start download` 한 번으로 네 탭의 내용을 모두 받습니다.
+`Start download`는 지금 보고 있는 종류만 새 폴더에 받습니다. 여러 종류가 필요하면 종류마다 받고 zip도 따로 만듭니다.
 
 | 탭 | 파일로 넣기 | 한 줄에 하나씩 적기 |
 |---|---|---|
@@ -88,17 +89,17 @@ python sneakernet_gui.py
 ### Step 2: Upload to Nexus — 폐쇄망 PC에서
 
 1. zip을 폐쇄망 PC로 옮겨 압축을 풀고 `Start sneakernet.bat`을 더블클릭합니다.
-2. `Step 2` 탭이 바로 열립니다. `Downloaded folder`는 압축 푼 곳의 `bundle` 폴더로 자동으로 채워집니다.
-3. `Nexus address`, `User name`, `Password`와, 올릴 종류에 맞는 저장소를 넣습니다. 비밀번호를 뺀 값은 이 PC에 기억됩니다.
+2. zip에 든 종류의 `Step 2` 탭이 바로 열립니다. `Downloaded folder`는 압축 푼 곳의 `bundle` 폴더로 자동으로 채워집니다.
+3. `Nexus address`, `User name`, `Password`와, 그 종류의 저장소를 넣습니다. 비밀번호를 뺀 값은 이 PC에 기억됩니다.
    - `Maven repository` (maven2 hosted), `npm repository` (npm hosted), `PyPI repository` (pypi hosted): 저장소 **이름**
    - `Docker registry address`: docker hosted 저장소의 커넥터 **주소** (예: `http://nexus:8082`). Nexus 주소와 다릅니다.
-   - 폴더에 들어 있는 종류의 칸만 채우면 됩니다. 필요한 칸이 비어 있으면 올리기 전에 어느 칸인지 알려 줍니다.
+   - 폴더에 다른 종류가 섞여 있어도 지금 탭의 종류만 올립니다 (CLI 의 `upload --kinds`).
 4. 먼저 `Trial run`을 체크하고 `Start upload`를 눌러 주소·계정·저장소가 맞는지 확인합니다.
 5. 체크를 풀고 `Start upload`를 다시 누릅니다. 로그 끝에 `업로드 N, 건너뜀 N, 실패 0`이 나오면 끝입니다.
 
 ### Step 3: Check — 폐쇄망 PC에서 (선택)
 
-Nexus 하나만 바라보고 빈 캐시에서 원래 프로젝트가 해석되는지 확인합니다. Maven / Gradle 라이브러리만 확인합니다
+`Maven / Gradle` 탭에만 있습니다. Nexus 하나만 바라보고 빈 캐시에서 원래 프로젝트가 해석되는지 확인합니다
 (npm, Python, Docker는 아래 "폐쇄망에서 받아 쓰기"의 명령으로 직접 확인하세요).
 
 1. `Sample projects folder`는 자동으로 채워집니다 (`bundle\_samples`).

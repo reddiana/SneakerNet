@@ -130,6 +130,9 @@ def post_component(client: HttpClient, url: str, repo: str, fmt: str, path: Path
     return "failed", f"HTTP {status} {msg}"
 
 
+KINDS = {"maven": "Maven / Gradle 라이브러리", "npm": "npm 패키지", "pypi": "Python 패키지", "docker": "Docker 이미지"}
+
+
 def run(args) -> int:
     root = Path(args.dir).resolve()
     if not root.is_dir():
@@ -152,6 +155,17 @@ def run(args) -> int:
     npm_files = sorted((root / "_npm").rglob("*.tgz"))
     pypi_files = sorted(f for f in (root / "_pypi").glob("*") if f.name.endswith((".whl", ".tar.gz", ".zip")))
     images = docker.load_images(root)
+    if getattr(args, "kinds", None):   # GUI 는 종류별 탭에서 그 종류만 올린다
+        kinds = {k.strip().lower() for k in args.kinds.split(",") if k.strip()}
+        unknown = kinds - set(KINDS)
+        if unknown:
+            raise BundlerError(f"알 수 없는 종류: {', '.join(sorted(unknown))} (가능: {', '.join(KINDS)})")
+        files, npm_files, pypi_files, images = (
+            found if kind in kinds else [] for kind, found in zip(KINDS, (files, npm_files, pypi_files, images)))
+        if not (files or npm_files or pypi_files or images):
+            wanted = " / ".join(KINDS[k] for k in KINDS if k in kinds)
+            raise BundlerError(f"이 폴더에는 올릴 {wanted} 이(가) 없습니다: {root}\n"
+                               "오류: Step 1 에서 이 종류를 받은 폴더인지 확인하세요.")
     if not (files or npm_files or pypi_files or images):
         raise BundlerError(f"업로드할 파일이 없습니다: {root}")
 

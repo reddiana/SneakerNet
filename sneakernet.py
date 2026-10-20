@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--npm-repo", help="npm hosted 저장소 이름 (npm 패키지가 있을 때)")
     u.add_argument("--pypi-repo", help="pypi hosted 저장소 이름 (Python 패키지가 있을 때)")
     u.add_argument("--docker-url", help="docker hosted 저장소의 레지스트리 주소, 예: http://nexus:8082 (Docker 이미지가 있을 때)")
+    u.add_argument("--kinds", help="올릴 종류만, 쉼표 구분: maven,npm,pypi,docker (기본: 폴더에 있는 것 전부)")
     u.add_argument("--user", "-u", help="업로드 계정")
     u.add_argument("--password", "-p", help="비밀번호 (환경 변수 NEXUS_PASSWORD 또는 터미널 입력 권장)")
     u.add_argument("--workers", type=int, default=4, help="동시 업로드 수 (기본 4)")

@@ -26,12 +26,39 @@ WRAP = 640
 _COORD_RE = re.compile(r"^[^:\s]+:[^:\s]+:[^:\s]+$")
 
 
-def load_platforms() -> tuple[list[str], list[str]]:
+def load_platforms(kind: str = "maven") -> tuple[list[str], list[str]]:
+    """대상 플랫폼 이름과 기본 선택. Docker 는 이미지가 있는 플랫폼(docker_platform)만."""
     try:
         cfg = json.loads((HERE / "repos.json").read_text(encoding="utf-8"))
-        return list(cfg["platforms"]), list(cfg["default_platforms"])
-    except (OSError, ValueError, KeyError):
-        return ["linux-x86_64", "windows-x86_64"], ["linux-x86_64", "windows-x86_64"]
+        names, defaults = list(cfg["platforms"]), list(cfg["default_platforms"])
+        if kind == "docker":
+            names = [n for n in names if cfg["platforms"][n].get("docker_platform")]
+        return names, [n for n in defaults if n in names] or names[:1]
+    except (OSError, ValueError, KeyError, AttributeError):
+        names = ["linux-x86_64"] if kind == "docker" else ["linux-x86_64", "windows-x86_64"]
+        return names, list(names)
+
+
+# 최상위 탭: (종류, 탭 제목, 안내문). 종류는 upload --kinds 의 값과 같다.
+KINDS = [
+    ("maven", "Maven / Gradle", "Java libraries for Maven and Gradle builds (jar, pom). Nexus repository type: maven2 (hosted)."),
+    ("npm", "npm", "JavaScript packages for npm. Nexus repository type: npm (hosted)."),
+    ("pypi", "Python (pip)", "Python packages for pip. Nexus repository type: pypi (hosted)."),
+    ("docker", "Docker images", "Container images. They can be loaded with docker load, or uploaded to a Nexus repository "
+                                "of type docker (hosted)."),
+]
+
+
+def bundle_kind(folder: str) -> str:
+    """다운로드 폴더에 들어 있는 종류 (반입용 zip 을 열었을 때 그 종류의 탭을 보여 주려고)."""
+    root = Path(folder) if folder else None
+    if not root or not root.is_dir():
+        return "maven"
+    for kind, sub, pattern in (("npm", "_npm", "*.tgz"), ("pypi", "_pypi", "*.*"), ("docker", "_docker", "*.tar")):
+        if any((root / sub).rglob(pattern)):
+            if not any(d.is_dir() and not d.name.startswith("_") for d in root.iterdir()):
+                return kind
+    return "maven"
 
 
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "sneakernet" / "settings.json"
@@ -116,8 +143,10 @@ sneakernet transfer package
 
 1. Extract this zip anywhere on a PC inside the air-gapped network (Python 3 required).
 2. Double-click "Start sneakernet.bat"  (or run: python sneakernet\\sneakernet_gui.py).
-3. Open "Step 2: Upload to Nexus", choose the "bundle" folder next to this file, fill in Nexus, press Start upload.
-4. Optional: "Step 3: Check" proves that Maven / Gradle can build using only Nexus.
+   It opens "Step 2: Upload to Nexus" in the tab of what this zip contains
+   (Maven / Gradle, npm, Python or Docker images).
+3. Check that "Downloaded folder" is the "bundle" folder next to this file, fill in Nexus, press Start upload.
+4. Maven / Gradle only, optional: "Step 3: Check" proves that Maven / Gradle can build using only Nexus.
 
   sneakernet\\   the program
   bundle\\       the downloaded libraries, packages and Docker images
@@ -175,17 +204,45 @@ class App(tk.Tk):
         self.mvn_cmd = tk.StringVar(value=find_tool("mvn"))
         self.gradle_cmd = tk.StringVar(value=find_tool("gradle"))
 
-        tabs = ttk.Notebook(self)
-        tabs.pack(fill="x", padx=8, pady=(8, 4))
+        # 다운로드 결과/옵션은 종류 탭끼리 함께 쓴다 (입력과 대상 플랫폼은 종류마다 따로)
+        self.auto_out = self._new_out()
+        self.out = tk.StringVar(value=self.auto_out)
+        self.force = tk.BooleanVar()
+        self.no_cross = tk.BooleanVar()
+        self.no_losers = tk.BooleanVar()
+        self.keep_logs = tk.BooleanVar(value=True)
+        self.verbose = tk.BooleanVar()
+        self.maven_goals = tk.StringVar()
+        self.check_exists = tk.BooleanVar()
+        self.dry_run = tk.BooleanVar()
+        self.inputs: dict[str, tk.Listbox] = {}
+        self.specs: dict[str, tk.Text] = {}
+        self.platforms: dict[str, dict[str, tk.BooleanVar]] = {}
+
+        ttk.Label(self, text="First choose what you want to bring into the air-gapped network, then follow its steps "
+                             "from left to right.", wraplength=WRAP + 200, justify="left").pack(
+            anchor="w", padx=12, pady=(8, 2))
+        kinds = ttk.Notebook(self)
+        kinds.pack(fill="x", padx=8, pady=(2, 4))
         self.run_buttons: list[ttk.Button] = []
-        tabs.add(self._collect_tab(tabs), text="  Step 1: Download (PC with internet)  ")
-        tabs.add(self._upload_tab(tabs), text="  Step 2: Upload to Nexus (air-gapped)  ")
-        tabs.add(self._verify_tab(tabs), text="  Step 3: Check (optional)  ")
+        self.kind_tabs: dict[str, tuple[ttk.Frame, ttk.Notebook]] = {}
+        for kind, title, intro in KINDS:
+            page = ttk.Frame(kinds, padding=(6, 6, 6, 0))
+            kinds.add(page, text=f"  {title}  ")
+            ttk.Label(page, text=intro, foreground=HINT_COLOR, wraplength=WRAP + 200, justify="left").pack(
+                anchor="w", pady=(0, 6))
+            steps = ttk.Notebook(page)
+            steps.pack(fill="x")
+            steps.add(self._collect_tab(steps, kind), text="  Step 1: Download (PC with internet)  ")
+            steps.add(self._upload_tab(steps, kind), text="  Step 2: Upload to Nexus (air-gapped)  ")
+            if kind == "maven":   # verify 는 Maven / Gradle 만 한다
+                steps.add(self._verify_tab(steps), text="  Step 3: Check (optional)  ")
+            self.kind_tabs[kind] = (page, steps)
 
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=8)
         ttk.Label(bar, text="Progress:").pack(side="left")
-        self.status = ttk.Label(bar, text="Ready. Fill in the step above and press its Start button.")
+        self.status = ttk.Label(bar, text="Ready. Choose a tab above, fill in a step and press its Start button.")
         self.status.pack(side="left", padx=4)
         self.stop_button = ttk.Button(bar, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="right")
@@ -203,8 +260,10 @@ class App(tk.Tk):
         self.log.pack(side="left", fill="both", expand=True)
 
         self.bundle.set(find_bundle())
-        if 1 <= step <= 3:
-            tabs.select(step - 1)
+        if step > 1:   # 반입용 zip 의 bat: 들어 있는 종류의 탭에서 Step 2 를 연다
+            page, steps = self.kind_tabs[bundle_kind(self.bundle.get())]
+            kinds.select(page)
+            steps.select(min(step, len(steps.tabs())) - 1)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(100, self._drain)
 
@@ -276,188 +335,203 @@ class App(tk.Tk):
                 args += [flag, var.get().strip()]
         return args
 
-    def _nexus_fields(self, parent, row: int, upload: bool = False) -> int:
+    def _repo_field(self, parent, row: int, kind: str) -> int:
+        """종류에 맞는 Nexus 저장소 입력란 하나."""
+        if kind == "maven":
+            return self._field(parent, row, "Maven repository", self.repo,
+                               "Name of a repository of type \"maven2 (hosted)\" that already exists in Nexus.")
+        if kind == "npm":
+            return self._field(parent, row, "npm repository", self.npm_repo,
+                               "Name of a repository of type \"npm (hosted)\" that already exists in Nexus.")
+        if kind == "pypi":
+            return self._field(parent, row, "PyPI repository", self.pypi_repo,
+                               "Name of a repository of type \"pypi (hosted)\" that already exists in Nexus.")
+        return self._field(parent, row, "Docker registry address", self.docker_url,
+                           "This is not the Nexus address above: it is the address of the HTTP connector of a "
+                           "\"docker (hosted)\" repository, for example http://nexus.mycompany.local:8082")
+
+    def _nexus_fields(self, parent, row: int, kind: str) -> int:
         row = self._field(parent, row, "Nexus address", self.url,
                           "Web address of your Nexus 3 server, for example http://nexus.mycompany.local:8081")
         row = self._field(parent, row, "User name", self.user,
-                          "Nexus account that may upload to the repositories below. Leave empty if no login is needed.")
+                          "Nexus account that may use the repository below. Leave empty if no login is needed.")
         row = self._field(parent, row, "Password", self.password,
                           "Never saved; type it each time. The other fields are remembered on this PC.", show="*")
-        row = self._field(parent, row, "Maven repository", self.repo,
-                          "Name of a repository of type \"maven2 (hosted)\" that already exists in Nexus. "
-                          "Maven / Gradle libraries go here.")
-        if not upload:
-            return row
-        row = self._field(parent, row, "npm repository", self.npm_repo,
-                          "Name of a repository of type \"npm (hosted)\". Used only if the folder contains npm packages.")
-        row = self._field(parent, row, "PyPI repository", self.pypi_repo,
-                          "Name of a repository of type \"pypi (hosted)\". Used only if the folder contains Python packages.")
-        return self._field(parent, row, "Docker registry address", self.docker_url,
-                           "Used only if the folder contains Docker images. This is not the Nexus address above: it is "
-                           "the address of the HTTP connector of a \"docker (hosted)\" repository, for example "
-                           "http://nexus.mycompany.local:8082")
+        return self._repo_field(parent, row, kind)
 
-    def _source_page(self, book, title: str, text_label: str, text_hint: str, files_label: str | None = None,
-                     files_hint: str = "", filetypes=None):
-        """Step 1 의 종류별 탭 한 장: (파일 목록) + 한 줄에 하나씩 적는 입력란. (탭, 목록, 입력란, 다음 행) 을 돌려준다."""
-        page = ttk.Frame(book, padding=6)
-        page.columnconfigure(1, weight=1)
-        book.add(page, text=f"  {title}  ")
-        row, box = 0, None
+    def _sources(self, parent, row: int, kind: str, text_label: str, text_hint: str, files_label: str | None = None,
+                 files_hint: str = "", filetypes=None) -> int:
+        """(파일 목록) + 한 줄에 하나씩 적는 입력란. 다음 행 번호를 돌려준다."""
         if files_label:
-            self._label(page, 0, files_label)
-            box = tk.Listbox(page, height=3, selectmode="extended")
-            box.grid(row=0, column=1, sticky="ew", pady=3)
-            side = ttk.Frame(page)
-            side.grid(row=0, column=2, sticky="n", padx=6, pady=3)
+            self._label(parent, row, files_label)
+            box = tk.Listbox(parent, height=3, selectmode="extended")
+            box.grid(row=row, column=1, sticky="ew", pady=3)
+            side = ttk.Frame(parent)
+            side.grid(row=row, column=2, sticky="n", padx=6, pady=3)
             ttk.Button(side, text="Add file...", command=lambda: self._add_inputs(box, files_label, filetypes)).pack(fill="x")
             ttk.Button(side, text="Remove", command=lambda: self._remove_inputs(box)).pack(fill="x", pady=2)
-            row = self._hint(page, 1, files_hint)
-        self._label(page, row, text_label)
-        text = tk.Text(page, height=3, font=("Consolas", 10))
+            self.inputs[kind] = box
+            row = self._hint(parent, row + 1, files_hint)
+        self._label(parent, row, text_label)
+        text = tk.Text(parent, height=5 if kind == "docker" else 3, font=("Consolas", 10))
         text.grid(row=row, column=1, sticky="ew", pady=3)
-        return page, box, text, self._hint(page, row + 1, text_hint)
+        self.specs[kind] = text
+        return self._hint(parent, row + 1, text_hint)
 
-    # ------------------------------------------------------------------ 탭
+    def _advanced(self, parent, row: int, button_parent) -> ttk.LabelFrame:
+        """'Show advanced options' 단추와 그 단추로 여닫는 틀. 틀은 row 행에 놓인다."""
+        frame = ttk.LabelFrame(parent, text="Advanced options (the defaults are fine for most cases)", padding=6)
 
-    def _collect_tab(self, tabs) -> ttk.Frame:
-        f = self._tab(tabs, "Do this on a PC that has internet access. It downloads everything you list here, including "
-                            "the libraries those libraries need, into one folder. Fill in any of the four tabs below: "
-                            "one download fetches all of them. Afterwards, carry the result to the air-gapped network "
-                            "and continue with Step 2.")
-        book = ttk.Notebook(f)
-        book.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        _, self.inputs, self.coords, _ = self._source_page(
-            book, "Maven / Gradle", "Single libraries\n(optional)",
-            "Instead of (or in addition to) a build file, type libraries here, one per line, "
-            "as group:artifact:version.  Example:  org.springframework:spring-core:6.1.14",
-            "Project build files",
-            "The file that lists your project's libraries: pom.xml (Maven) or build.gradle / build.gradle.kts (Gradle). "
-            "You can add several, and the file name can be anything (for example pom23.xml and pom26.xml).",
-            [("Build files", "*.xml *.pom *.gradle *.gradle.kts"), ("All files", "*.*")])
-        _, self.npm_inputs, self.npm_specs, _ = self._source_page(
-            book, "npm", "Single packages\n(optional)",
-            "Instead of (or in addition to) a file, type npm packages here, one per line, as name@version.  "
-            "Example:  express@4.19.2   or   @types/node@20.14.0",
-            "package.json files",
-            "Your project's package.json or package-lock.json. A package-lock.json is best: exactly the versions in it "
-            "are downloaded. With only a package.json, npm must be installed on this PC to work out the versions.",
-            [("npm files", "*.json"), ("All files", "*.*")])
-        page, self.pypi_inputs, self.pypi_specs, row = self._source_page(
-            book, "Python (pip)", "Single packages\n(optional)",
-            "Instead of (or in addition to) a file, type Python packages here, one per line, as name==version.  "
-            "Example:  requests==2.32.3",
-            "requirements files",
-            "Your project's requirements.txt (any name ending in .txt). The packages that those packages need are "
-            "downloaded too.",
-            [("Requirements files", "*.txt"), ("All files", "*.*")])
-        self._field(page, row, "Python versions", self.python_versions,
-                    "The Python version used where the packages will be installed, for example 3.11. Several: 3.11,3.12. "
-                    "Files are downloaded for exactly these versions and for the target systems ticked below.")
-        _, _, self.images, _ = self._source_page(
-            book, "Docker images", "Images",
-            "Docker images, one per line, as name:tag.  Examples:  nginx:1.27   bitnami/redis:7.2   "
-            "ghcr.io/org/app:1.0\nDocker does not need to be installed. Linux images are downloaded "
-            "(linux/amd64 unless only an arm target system is ticked). Each image is saved as a .tar file in the "
-            "_docker folder that can be loaded directly with  docker load -i <file>.tar  . In Nexus the image keeps its "
-            "name without the original registry address, for example nginx:1.27 or org/app:1.0.")
-        self.images.configure(height=5)
-        row = 2
+        def toggle() -> None:
+            if frame.winfo_ismapped():
+                frame.grid_remove()
+                button.configure(text="Show advanced options")
+            else:
+                frame.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+                button.configure(text="Hide advanced options")
+        button = ttk.Button(button_parent, text="Show advanced options", command=toggle)
+        button.pack(anchor="w", pady=(4, 2))
+        return frame
 
-        self.auto_out = self._new_out()
-        self.out = tk.StringVar(value=self.auto_out)
+    def _collect_tab(self, tabs, kind: str) -> ttk.Frame:
+        what = {"maven": "libraries", "npm": "packages", "pypi": "packages", "docker": "images"}[kind]
+        f = self._tab(tabs, f"Do this on a PC that has internet access. It downloads the {what} you list here"
+                            + ("" if kind == "docker" else f", including the {what} they need,")
+                            + " into a new folder. Afterwards, carry the result to the air-gapped network and continue "
+                              "with Step 2.")
+        if kind == "maven":
+            row = self._sources(
+                f, 1, kind, "Single libraries\n(optional)",
+                "Instead of (or in addition to) a build file, type libraries here, one per line, "
+                "as group:artifact:version.  Example:  org.springframework:spring-core:6.1.14",
+                "Project build files",
+                "The file that lists your project's libraries: pom.xml (Maven) or build.gradle / build.gradle.kts "
+                "(Gradle). You can add several, and the file name can be anything (for example pom23.xml and pom26.xml).",
+                [("Build files", "*.xml *.pom *.gradle *.gradle.kts"), ("All files", "*.*")])
+            systems = ("Operating systems the libraries will be used on. Some libraries ship a separate file per "
+                       "system (for example netty, JavaFX); only the ticked ones are downloaded.")
+        elif kind == "npm":
+            row = self._sources(
+                f, 1, kind, "Single packages\n(optional)",
+                "Instead of (or in addition to) a file, type npm packages here, one per line, as name@version.  "
+                "Example:  express@4.19.2   or   @types/node@20.14.0",
+                "package.json files",
+                "Your project's package.json or package-lock.json. A package-lock.json is best: exactly the versions "
+                "in it are downloaded. With only a package.json, npm must be installed on this PC to work out the versions.",
+                [("npm files", "*.json"), ("All files", "*.*")])
+            systems = ("Operating systems the packages will be used on. Packages made for one system only "
+                       "(for example esbuild's binaries) are downloaded only for the ticked ones.")
+        elif kind == "pypi":
+            row = self._sources(
+                f, 1, kind, "Single packages\n(optional)",
+                "Instead of (or in addition to) a file, type Python packages here, one per line, as name==version.  "
+                "Example:  requests==2.32.3",
+                "requirements files",
+                "Your project's requirements.txt (any name ending in .txt). The packages that those packages need are "
+                "downloaded too.",
+                [("Requirements files", "*.txt"), ("All files", "*.*")])
+            row = self._field(f, row, "Python versions", self.python_versions,
+                              "The Python version used where the packages will be installed, for example 3.11. "
+                              "Several: 3.11,3.12. Files are downloaded for exactly these versions and systems.")
+            systems = "Operating systems the packages will be installed on. Files are downloaded for each ticked one."
+        else:
+            row = self._sources(
+                f, 1, kind, "Images",
+                "Docker images, one per line, as name:tag.  Examples:  nginx:1.27   bitnami/redis:7.2   "
+                "ghcr.io/org/app:1.0\nDocker does not need to be installed. Each image is saved as a .tar file in the "
+                "_docker folder that can be loaded directly with  docker load -i <file>.tar  . In Nexus the image "
+                "keeps its name without the original registry address, for example nginx:1.27 or org/app:1.0.")
+            systems = "Linux image variants to download. One .tar file is saved per image and ticked system."
+
         self._label(f, row, "Target systems")
-        names, defaults = load_platforms()
-        self.platforms = {n: tk.BooleanVar(value=n in defaults) for n in names}
+        names, defaults = load_platforms(kind)
+        self.platforms[kind] = {n: tk.BooleanVar(value=n in defaults) for n in names}
         pf = ttk.Frame(f)
         pf.grid(row=row, column=1, columnspan=2, sticky="w")
-        for n, v in self.platforms.items():
+        for n, v in self.platforms[kind].items():
             ttk.Checkbutton(pf, text=n, variable=v).pack(side="left", padx=(0, 10))
-        row = self._hint(f, row + 1, "Operating systems the libraries will be used on. Some libraries ship a separate "
-                                     "file per system; only the ticked ones are downloaded. Applies to all four tabs.")
-
-        self.force = tk.BooleanVar()
-        self.no_cross = tk.BooleanVar()
-        self.no_losers = tk.BooleanVar()
-        self.keep_logs = tk.BooleanVar(value=True)
-        self.verbose = tk.BooleanVar()
-        self.maven_goals = tk.StringVar()
+        row = self._hint(f, row + 1, systems)
 
         of = ttk.Frame(f)
         of.grid(row=row, column=1, columnspan=2, sticky="w")
         self._check(of, "Empty the folder first if it already contains files", self.force)
-        self.adv_button = ttk.Button(of, text="Show advanced options", command=self._toggle_advanced)
-        self.adv_button.pack(anchor="w", pady=(4, 2))
-
-        self.advanced = ttk.LabelFrame(f, text="Advanced options (the defaults are fine for most cases)", padding=6)
-        self.advanced_row = row + 1
-        self._check(self.advanced, "Faster but less complete: resolve with one build tool only", self.no_cross,
-                    "Normally libraries are resolved with both Maven and Gradle, because the two tools can pick "
-                    "different versions. Tick this only if a single tool will ever use the Nexus repository.")
-        self._check(self.advanced, "Do not download older versions that lost a version conflict", self.no_losers,
-                    "Build tools still read the description file of a version they end up not using. "
-                    "Skipping them saves little space and can break builds.")
-        self._check(self.advanced, "Keep the Maven / Gradle logs", self.keep_logs,
-                    "Saved next to the download folder as <folder>-work. Useful when something fails.")
-        self._check(self.advanced, "Show more detail in the progress log", self.verbose)
-        mg = ttk.Frame(self.advanced)
-        mg.pack(fill="x", pady=(4, 0))
-        ttk.Label(mg, text="Extra Maven goals").pack(side="left")
-        ttk.Entry(mg, textvariable=self.maven_goals, width=40).pack(side="left", padx=6)
-        ttk.Label(self.advanced, foreground=HINT_COLOR, wraplength=WRAP - 24, justify="left",
-                  text="Only for Maven projects whose offline build later fails because test libraries are missing: "
-                       "type  verify  to run a real build here and capture them.").pack(anchor="w")
-        df = ttk.Frame(self.advanced)
+        adv = self._advanced(f, row + 1, of)
+        if kind == "maven":
+            self._check(adv, "Faster but less complete: resolve with one build tool only", self.no_cross,
+                        "Normally libraries are resolved with both Maven and Gradle, because the two tools can pick "
+                        "different versions. Tick this only if a single tool will ever use the Nexus repository.")
+            self._check(adv, "Do not download older versions that lost a version conflict", self.no_losers,
+                        "Build tools still read the description file of a version they end up not using. "
+                        "Skipping them saves little space and can break builds.")
+            self._check(adv, "Keep the Maven / Gradle logs", self.keep_logs,
+                        "Saved next to the download folder as <folder>-work. Useful when something fails.")
+        else:
+            self._check(adv, "Keep the work files and logs", self.keep_logs,
+                        "Saved next to the download folder as <folder>-work. Useful when something fails.")
+        self._check(adv, "Show more detail in the progress log", self.verbose)
+        if kind == "maven":
+            mg = ttk.Frame(adv)
+            mg.pack(fill="x", pady=(4, 0))
+            ttk.Label(mg, text="Extra Maven goals").pack(side="left")
+            ttk.Entry(mg, textvariable=self.maven_goals, width=40).pack(side="left", padx=6)
+            ttk.Label(adv, foreground=HINT_COLOR, wraplength=WRAP - 24, justify="left",
+                      text="Only for Maven projects whose offline build later fails because test libraries are "
+                           "missing: type  verify  to run a real build here and capture them.").pack(anchor="w")
+        df = ttk.Frame(adv)
         df.pack(fill="x", pady=(8, 0))
         ttk.Label(df, text="Download folder").pack(side="left")
         ttk.Entry(df, textvariable=self.out).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(df, text="Choose...", command=self._pick_dir(self.out, "Folder to download into")).pack(side="left")
-        ttk.Label(self.advanced, foreground=HINT_COLOR, wraplength=WRAP - 24, justify="left",
-                  text="Where the libraries are downloaded. A new folder in Downloads is used for every download "
+        ttk.Label(adv, foreground=HINT_COLOR, wraplength=WRAP - 24, justify="left",
+                  text="Where the downloads are saved. A new folder in Downloads is used for every download "
                        "unless you change this.").pack(anchor="w")
 
         bf = ttk.Frame(f)
         bf.grid(row=row + 2, column=1, columnspan=2, sticky="w", pady=(8, 2))
-        self._run_button(bf, "Start download", self.run_collect).pack(side="left")
+        self._run_button(bf, "Start download", lambda: self.run_collect(kind)).pack(side="left")
         self._run_button(bf, "Create transfer zip...", self.zip_download).pack(side="left", padx=(6, 0))
         ttk.Button(bf, text="Open result folder", command=self._open_result).pack(side="left", padx=6)
         ttk.Button(bf, text="Open summary report", command=self._open_report).pack(side="left")
-        self._hint(f, row + 3, "1) \"Start download\" saves everything from the four tabs in a new folder inside your Downloads folder.  "
-                               "2) \"Create transfer zip...\" then asks where to save one zip file (for example on a "
-                               "USB drive) that contains this program and the downloads. Carry that file.  "
-                               "When the download finishes its folder opens. If you only need Docker images, no zip is "
-                               "needed: carry the .tar files and run  docker load -i <file>.tar  there.")
+        if kind == "docker":
+            hint = ("\"Start download\" saves the .tar files in the _docker folder of a new folder inside your Downloads "
+                    "folder, and opens it. To use the images with docker, just carry the .tar files and run  "
+                    "docker load -i <file>.tar  there. To upload them to Nexus instead, press \"Create transfer zip...\": "
+                    "it asks where to save one zip file (for example on a USB drive) with this program and the images.")
+        else:
+            hint = ("1) \"Start download\" saves everything above in a new folder inside your Downloads folder, and "
+                    "opens it.  2) \"Create transfer zip...\" then asks where to save one zip file (for example on a "
+                    "USB drive) that contains this program and the downloads. Carry that file.")
+        self._hint(f, row + 3, hint)
         return f
 
-    def _upload_tab(self, tabs) -> ttk.Frame:
+    def _upload_tab(self, tabs, kind: str) -> ttk.Frame:
+        what = {"maven": "libraries, so that Maven and Gradle", "npm": "packages, so that npm",
+                "pypi": "packages, so that pip", "docker": "images, so that docker"}[kind]
         f = self._tab(tabs, "Do this inside the air-gapped network, after copying the folder from Step 1. "
-                            "It uploads everything in that folder to your Nexus 3 server, so that Maven, Gradle, npm, pip "
-                            "and docker can download from Nexus. Each kind goes to its own repository; a repository is "
-                            "needed only for the kinds the folder contains. Only Python is needed on this PC.")
+                            f"It uploads the {what} can download them from Nexus. Only Python is needed on this PC.")
         row = self._field(f, 1, "Downloaded folder", self.bundle,
-                          "The folder that Step 1 created (it contains _report.txt and _artifacts.csv). Filled in "
-                          "automatically when a \"bundle\" folder is found next to this program.",
+                          "The folder that Step 1 created (it contains _report.txt). Filled in automatically when "
+                          "a \"bundle\" folder is found next to this program.",
                           self._pick_dir(self.bundle, "Folder created by Step 1"))
-        row = self._nexus_fields(f, row, upload=True)
-        self.check_exists = tk.BooleanVar()
-        self.dry_run = tk.BooleanVar()
+        row = self._nexus_fields(f, row, kind)
         of = ttk.Frame(f)
         of.grid(row=row, column=1, columnspan=2, sticky="w")
-        self._check(of, "Skip files that are already in Nexus", self.check_exists,
-                    "Asks Nexus about each file first. Slower to start, but avoids uploading the same file twice.")
+        if kind == "maven":   # --check-exists 는 Maven 파일에만 쓰인다
+            self._check(of, "Skip files that are already in Nexus", self.check_exists,
+                        "Asks Nexus about each file first. Slower to start, but avoids uploading the same file twice.")
         self._check(of, "Trial run: only count the files, upload nothing", self.dry_run)
-        self._run_button(f, "Start upload", self.run_upload).grid(row=row + 1, column=1, sticky="w", pady=(8, 2))
+        self._run_button(f, "Start upload", lambda: self.run_upload(kind)).grid(
+            row=row + 1, column=1, sticky="w", pady=(8, 2))
         return f
 
     def _verify_tab(self, tabs) -> ttk.Frame:
         f = self._tab(tabs, "Optional. Do this inside the air-gapped network after Step 2. It proves the upload is "
                             "complete by resolving the original project with Maven and Gradle, using only your Nexus "
-                            "server and an empty cache. Requires a JDK plus mvn and/or gradle on this PC. "
-                            "npm packages, Python packages and Docker images are not checked here.")
+                            "server and an empty cache. Requires a JDK plus mvn and/or gradle on this PC.")
         row = self._field(f, 1, "Sample projects folder", self.samples,
                           "The _samples folder inside the downloaded folder. Filled in automatically when you choose "
                           "the folder in Step 2.", self._pick_dir(self.samples, "The _samples folder"))
-        row = self._nexus_fields(f, row)
+        row = self._nexus_fields(f, row, "maven")
         row = self._tool_fields(f, row)
         self.use_maven = tk.BooleanVar(value=True)
         self.use_gradle = tk.BooleanVar(value=True)
@@ -476,14 +550,6 @@ class App(tk.Tk):
         return f
 
     # ------------------------------------------------------------------ 동작
-
-    def _toggle_advanced(self) -> None:
-        if self.advanced.winfo_ismapped():
-            self.advanced.grid_remove()
-            self.adv_button.configure(text="Show advanced options")
-        else:
-            self.advanced.grid(row=self.advanced_row, column=1, columnspan=2, sticky="ew", pady=4)
-            self.adv_button.configure(text="Hide advanced options")
 
     def _suggest_samples(self, *_):
         samples = Path(self.bundle.get().strip() or ".") / "_samples"
@@ -507,16 +573,16 @@ class App(tk.Tk):
         else:
             self._set_log(report.read_text(encoding="utf-8", errors="replace"))
 
-    def run_collect(self) -> None:
+    def run_collect(self, kind: str) -> None:
         lines = lambda text: [c.strip() for c in text.get("1.0", "end").splitlines() if c.strip()]   # noqa: E731
-        inputs = [p for box in (self.inputs, self.npm_inputs, self.pypi_inputs) for p in box.get(0, "end")]
-        coords, npm_specs, pypi_specs, images = (lines(t) for t in (self.coords, self.npm_specs, self.pypi_specs, self.images))
+        inputs = list(self.inputs[kind].get(0, "end")) if kind in self.inputs else []
+        specs = lines(self.specs[kind])
         out = self.out.get().strip()
-        platforms = [n for n, v in self.platforms.items() if v.get()]
-        if not (inputs or coords or npm_specs or pypi_specs or images):
-            return self._need("Nothing to download yet.\n\nIn one of the four tabs (Maven / Gradle, npm, Python, "
-                              "Docker images), add a file with \"Add file...\" or type a line in the box.")
-        bad = [c for c in coords if not _COORD_RE.match(c)]
+        platforms = [n for n, v in self.platforms[kind].items() if v.get()]
+        if not (inputs or specs):
+            return self._need("Nothing to download yet.\n\n" + ("Type at least one image in the box." if kind == "docker"
+                              else "Add a file with \"Add file...\" or type a line in the box."))
+        bad = [c for c in specs if not _COORD_RE.match(c)] if kind == "maven" else []
         if bad:
             return self._need("This line is not in the form group:artifact:version:\n\n" + bad[0] +
                               "\n\nExample: org.springframework:spring-core:6.1.14")
@@ -531,23 +597,24 @@ class App(tk.Tk):
         args += ["collect", "--out", out, "--platforms", ",".join(platforms)]
         for p in inputs:
             args += ["--input", p]
-        for flag, values in (("--coordinate", coords), ("--npm", npm_specs), ("--pypi", pypi_specs), ("--image", images)):
-            for value in values:
-                args += [flag, value]
-        if self.python_versions.get().strip():
+        flag = {"maven": "--coordinate", "npm": "--npm", "pypi": "--pypi", "docker": "--image"}[kind]
+        for value in specs:
+            args += [flag, value]
+        if kind == "pypi" and self.python_versions.get().strip():
             args += ["--python-versions", self.python_versions.get().replace(" ", "")]
             self._save_settings()
-        if self.maven_goals.get().strip():
+        if kind == "maven" and self.maven_goals.get().strip():
             args += ["--maven-goals", self.maven_goals.get().strip()]
         if self.keep_logs.get():
             # 로그는 결과 디렉토리 옆에 둔다 (결과 디렉토리 안에 두면 업로드 대상이 된다).
             args += ["--work-dir", out.rstrip("\\/") + "-work"]
-        for flag, var in (("--force", self.force), ("--no-cross", self.no_cross), ("--no-losers", self.no_losers)):
-            if var.get():
-                args.append(flag)
-        args += self._tool_args()
-        only_images = images and not (inputs or coords or npm_specs or pypi_specs)
-        if only_images:   # Docker 이미지만 받았으면 zip 없이 tar 를 그대로 가져가면 된다
+        options = [("--force", self.force)]
+        if kind == "maven":
+            options += [("--no-cross", self.no_cross), ("--no-losers", self.no_losers)]
+        args += [flag for flag, var in options if var.get()]
+        if kind == "maven":
+            args += self._tool_args()
+        if kind == "docker":   # Docker 이미지는 zip 없이 tar 를 그대로 가져가면 된다
             folder = Path(out) / "_docker"
             text = (f"Download finished: {folder}  Carry the .tar files and run  docker load -i <file>.tar  "
                     "(or press \"Create transfer zip...\" to upload them to Nexus).")
@@ -635,21 +702,19 @@ class App(tk.Tk):
                        "docker_url": self.docker_url.get().strip(), "python_versions": self.python_versions.get().strip(),
                        "zip_dir": self.zip_dir.get().strip()})
 
-    def _nexus_args(self, upload: bool = False) -> list[str] | None:
+    def _nexus_args(self, kind: str) -> list[str] | None:
+        flag, var, label = {"maven": ("--repo", self.repo, "Maven repository"),
+                            "npm": ("--npm-repo", self.npm_repo, "npm repository"),
+                            "pypi": ("--pypi-repo", self.pypi_repo, "PyPI repository"),
+                            "docker": ("--docker-url", self.docker_url, "Docker registry address")}[kind]
         if not self.url.get().strip():
             self._need("Fill in the Nexus address.")
             return None
-        if not upload and not self.repo.get().strip():
-            self._need("Fill in the Maven repository name.")
+        if not var.get().strip():
+            self._need(f"Fill in the {label}.")
             return None
         self._save_settings()
-        args = ["--url", self.url.get().strip()]
-        targets = [("--repo", self.repo)]
-        if upload:   # 비어 있는 칸은 넘기지 않는다. 폴더에 그 종류가 들어 있으면 CLI 가 어느 칸이 필요한지 알려 준다.
-            targets += [("--npm-repo", self.npm_repo), ("--pypi-repo", self.pypi_repo), ("--docker-url", self.docker_url)]
-        for flag, var in targets:
-            if var.get().strip():
-                args += [flag, var.get().strip()]
+        args = ["--url", self.url.get().strip(), flag, var.get().strip()]
         if self.user.get().strip():
             if not self.password.get():
                 self._need("Type the password for the Nexus user, or clear the user name if no login is needed.")
@@ -657,20 +722,21 @@ class App(tk.Tk):
             args += ["--user", self.user.get().strip()]
         return args
 
-    def run_upload(self) -> None:
+    def run_upload(self, kind: str) -> None:
         bundle = self.bundle.get().strip()
         if not bundle:
             return self._need("Choose the folder that Step 1 created (\"Downloaded folder\").")
-        nexus = self._nexus_args(upload=True)
+        nexus = self._nexus_args(kind)
         if nexus is None:
             return
-        report = Path(bundle.rstrip("\\/") + "-upload-report.json")
-        args = ["upload", "--dir", bundle, "--report", str(report)] + nexus
-        if self.check_exists.get():
+        report = Path(bundle.rstrip("\\/") + f"-upload-{kind}-report.json")
+        args = ["upload", "--dir", bundle, "--kinds", kind, "--report", str(report)] + nexus
+        if kind == "maven" and self.check_exists.get():
             args.append("--check-exists")
         if self.dry_run.get():
             args.append("--dry-run")
-        self._start(args, None, f"Upload finished. Details are in {report}. You can now run Step 3 to check it.")
+        text = f"Upload finished. Details are in {report}."
+        self._start(args, None, text + (" You can now run Step 3 to check it." if kind == "maven" else ""))
 
     def run_verify(self) -> None:
         samples = self.samples.get().strip()
@@ -679,7 +745,7 @@ class App(tk.Tk):
             return self._need("Choose the _samples folder (it is inside the folder that Step 1 created).")
         if not tools:
             return self._need("Tick Maven, Gradle, or both.")
-        nexus = self._nexus_args()
+        nexus = self._nexus_args("maven")
         if nexus is None:
             return
         args = ["verify", "--samples", samples, "--tools", ",".join(tools)] + nexus + self._tool_args()
